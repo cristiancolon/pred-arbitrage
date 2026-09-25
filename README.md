@@ -47,18 +47,34 @@ Both venues charge takers `coef × contracts × p × (1 − p)`:
 At 50¢ that is ~1.75¢ per contract on each venue, so a pair needs a gap of ~3.5¢ just
 to break even.
 
-### Sizing to your bankroll
+### Sizing to your bankroll, and picks
 
-Opportunities are sized to `bankroll_usd` ($200 by default), assumed split evenly
+Opportunities are sized to `bankroll_usd` ($300 by default), assumed split evenly
 across the two venues because each leg is paid for on its own venue. A window's size,
-capital and profit are what $250 on each side could buy at that moment. Summing
-windows would still assume a fresh bankroll for each one, so the Overview also
-**simulates one bankroll**: windows are taken in the order they appeared, each stake
-stays tied up until its market resolves, and windows are skipped when they closed
-within `sim_min_window_s` (1 s), return less than `sim_min_annualized_return` (10%
-a year), or show an edge over `sim_max_edge` (5¢ per $1 pair, which in practice has
-meant a rules mismatch or a stale quote, e.g. a suspended in-game market). Changing the bankroll re-sizes the recorded history at the next start, from
-the order books stored with each observation (`arbscan rescale` does it by hand).
+capital and profit are what $150 on each side could buy at that moment. Changing the
+bankroll re-sizes the recorded history at the next start, from the order books stored
+with each observation (`arbscan rescale` does it by hand).
+
+Money in a pair is tied up until the market resolves, so a small edge that resolves
+tonight beats a bigger one that resolves in three months. Windows are ranked by
+**return per year of lock-up** (profit ÷ capital, scaled by the days until the market
+resolves; anything resolving within 6 hours counts as 6 hours), and a window is a
+**pick** only if it:
+
+- resolves within `pick_max_days` (7 days),
+- returns at least `pick_min_annualized_return` (100% a year),
+- has an edge no bigger than `pick_max_edge` (5¢ per $1 pair; bigger has in practice
+  meant a rules mismatch or a stale quote), and
+- stayed open at least `pick_min_window_s` (1 s).
+
+The Overview lists the best picks open right now, and the Opportunities page shows
+picks by default (switch to "All windows" to see the rest and why each was left out).
+Summing windows would assume a fresh bankroll for each one, so the Overview also
+**simulates one bankroll**: whenever cash is free it funds the open picks with the best
+return per year first, and each stake stays tied up until its market resolves (at
+least an hour). On the first 4.6 hours of streaming data, these rules kept 163 of
+~1,900 usable windows and did at least as well as looser or stricter ones, but that's
+too little data to tune on; revisit them as history builds up.
 
 ### What the numbers do *not* include
 

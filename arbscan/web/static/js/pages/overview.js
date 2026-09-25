@@ -1,5 +1,5 @@
 import { html } from "../vendor/preact-htm.js";
-import { ago, api, cents, compact, dirLabel, duration, int, money, navigate, toast, useFetch, useNow, usePref, useStore } from "../lib.js";
+import { ago, api, cents, compact, days, dirLabel, duration, int, money, navigate, perYear, ruleText, toast, useFetch, useNow, usePref, useStore } from "../lib.js";
 import { ChartCard, ColumnChart, LineChart, Sparkline } from "../charts.js";
 import { Card, DivBar, Edge, Empty, Icon, PairName, RelationChip, Seg, Status, Tile } from "../ui.js";
 
@@ -46,7 +46,7 @@ export function Pipeline() {
   const discHour = Object.values(p.discovery?.hour || {}).reduce((a, b) => a + b, 0);
   const jv = rev.jev || {};
   const rep = p.report || {};
-  const openNow = s.open_count || 0;
+  const picksNow = s.open_picks || 0;
   const stageRunning = (name) => running && job.stage === name;
   return html`<section class="card pipeline" aria-label="Pipeline">
     <${Stage} icon="database" name="Catalog" active=${stageRunning("catalog")} progress=${stageRunning("catalog")}
@@ -80,10 +80,10 @@ export function Pipeline() {
             : `Reconnecting: ${Object.entries(sc.feeds || {}).filter(([, f]) => !f.connected).map(([n]) => (n === "pmus" ? "Polymarket" : "Kalshi")).join(", ")}`}<//>`
         : fresh ? html`<${Status} tone="good" pulse>Sweeping every ${sc.poll_interval_s}s · ${(last.dur_ms / 1000).toFixed(1)}s each<//>`
         : html`<${Status} tone="warning">Last sweep ${ago(last?.ts, now)}<//>`} />
-    <${Stage} icon="chart" name="Report" active=${openNow > 0}
+    <${Stage} icon="chart" name="Report" active=${picksNow > 0}
       action=${html`<a class="btn ghost sm" href="#/opportunities">Open<${Icon} name="arrow" size=${13} /></a>`}
       value=${int(rep.windows_24h)} sub="profitable windows in 24h"
-      foot=${html`<span class="muted" style="font-size:12px">${money(rep.profit_24h)} best case · ${openNow} open now</span>`} />
+      foot=${html`<span class="muted" style="font-size:12px">${int(picksNow)} picks open now · ${int(s.open_count)} windows</span>`} />
   </section>`;
 }
 
@@ -91,8 +91,8 @@ function OpenList({ open, now }) {
   if (!open.length) return null;
   return html`<div class="list">${open.map((o) => html`<div class="list-row clickable" key=${o.pair + o.direction}
       style="grid-template-columns:minmax(0,1fr) auto auto" onClick=${() => navigate("pairs", { id: o.pair })}>
-    <div><${PairName} ...${o} /><div class="muted" style="font-size:12px;margin-top:2px">${dirLabel(o.direction)} · open ${duration(now - o.start_ts)}</div></div>
-    <div class="cell-2" style="text-align:right"><${Edge} edge=${o.edge} strong /><span class="muted num" style="font-size:12px">${int(o.size)} contracts</span></div>
+    <div><${PairName} ...${o} /><div class="muted" style="font-size:12px;margin-top:2px">${dirLabel(o.direction)} · open ${duration(now - o.start_ts)} · resolves in ${days(o.days)}</div></div>
+    <div class="cell-2" style="text-align:right"><${Edge} edge=${o.edge} strong /><span class="muted num" style="font-size:12px">${perYear(o.rate)}</span></div>
     <div class="cell-2" style="text-align:right;min-width:84px"><b class="num">${money(o.profit)}</b><span class="muted num" style="font-size:12px">on ${money(o.cost, 0)}</span></div>
   </div>`)}</div>`;
 }
@@ -115,7 +115,7 @@ export function Overview() {
   const { data, loading } = useFetch(`/api/overview?hours=${hours}`, [], { refreshOn: (st) => Math.floor(st.pairsVersion / 5) });
   const k = data?.kpi || {};
   const closest = s?.closest || [];
-  const open = s?.open || [];
+  const picks = (s?.open || []).filter((o) => !o.why);
   const best = closest[0];
   const edgeSeries = [{ name: "Best net edge across all pairs", color: "var(--series-1)", points: data?.edge || [] }];
   const profit = (data?.profit || []).map((b) => ({ ...b, value: b.profit }));
@@ -133,10 +133,10 @@ export function Overview() {
       <${Tile} label="Closest to breakeven now" value=${best ? cents(best.edge) : "—"}
         foot=${best ? html`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(best.k_title || "").split(" | ")[0]}</span>` : "per $1 pair, after both fees"} />
       <${Tile} label="Profitable windows" value=${int(k.windows)}
-        foot=${k.median_duration != null ? `median ${duration(k.median_duration)} open` : "none in this range"} />
+        foot=${k.windows ? `${int(k.picks)} picks · median ${duration(k.median_duration)} open` : "none in this range"} />
       ${data?.sim ? html`<${Tile} label=${`With your ${money(data.sim.bankroll, 0)}`} value=${money(data.sim.profit)}
-          title=${`Simulated best case for one bankroll: windows taken in the order they appeared, skipping any open under ${data.sim.min_window_s} s, returning under ${Math.round(data.sim.min_annualized * 100)}% a year, or with an edge over ${Math.round((data.sim.max_edge || 1) * 100)}¢ (usually a rules mismatch or stale quote); each stake stays tied up until its market resolves. Assumes both legs fill at the quoted prices.`}
-          foot=${`${int(data.sim.taken)} windows taken · ${money(data.sim.tied_up, 0)} still tied up`} />`
+          title=${`Simulated best case for one bankroll: whenever cash is free it funds the open picks with the best return per year first (a pick ${ruleText(data.sim)}); each stake stays tied up until its market resolves. Assumes each window is caught at its peak and both legs fill at the quoted prices.`}
+          foot=${`${int(data.sim.taken)} picks funded · ${money(data.sim.tied_up, 0)} still tied up`} />`
         : html`<${Tile} label="Best-case profit" value=${money(k.profit)}
           foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />`}
       ${s?.scanner?.mode === "stream"
@@ -157,24 +157,24 @@ export function Overview() {
     <//>
 
     <div class="grid cols-2 align-start">
-      <${Card} title="Open opportunities" flush
-        sub=${`Profitable after fees right now, walked through both order books${s?.open_count > open.length ? `; the ${open.length} most profitable shown` : ""}`}
-        actions=${open.length ? html`<span class="badge accent">${int(s.open_count)} open</span>` : null}>
-        ${open.length ? html`<${OpenList} open=${open} now=${now} />` : html`<${Empty} icon="zap" title="No open windows">
-          ${best ? html`The closest pair is ${cents(best.edge)} from breakeven.` : "Nothing is profitable after fees right now."}<//>`}
+      <${Card} title="Best picks right now" flush
+        sub=${`Open windows that meet the pick rules (${ruleText(s?.rules)}), best return per year first`}
+        actions=${picks.length ? html`<span class="badge accent">${int(s.open_picks)} picks</span>` : null}>
+        ${picks.length ? html`<${OpenList} open=${picks} now=${now} />` : html`<${Empty} icon="zap" title="No picks open">
+          ${s?.open_count ? `${int(s.open_count)} windows are open, but none meets the pick rules.` : best ? html`The closest pair is ${cents(best.edge)} from breakeven.` : "Nothing is profitable after fees right now."}<//>`}
       <//>
       <${Card} title="Closest to breakeven" sub="Every watched pair's best direction, right now" flush>
         <${Closest} rows=${closest} />
       <//>
     </div>
 
-    <${ChartCard} title="Best-case profit by period"
-      sub=${`Sum of each window's peak profit${data?.sim ? `, each sized to your ${money(data.sim.bankroll, 0)}` : ""}, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}. Windows overlap, so this adds up more than one bankroll could make.`}
+    <${ChartCard} title="Picks' best-case profit by period"
+      sub=${`Sum of each pick's peak profit${data?.sim ? `, each sized to your ${money(data.sim.bankroll, 0)}` : ""}, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}. Picks overlap, so this adds up more than one bankroll could make.`}
       loading=${loading && data}
-      table=${{ columns: ["Period", "Windows", "Best-case profit", "Capital"], rows: profit.slice().reverse().map((b) => [bucketFmt(b), b.windows, money(b.profit), money(b.capital, 0)]) }}>
+      table=${{ columns: ["Period", "Windows", "Picks", "Best-case profit", "Capital"], rows: profit.slice().reverse().map((b) => [bucketFmt(b), b.windows, b.picks, money(b.profit), money(b.capital, 0)]) }}>
       <${ColumnChart} data=${profit} height=${200} yFmt=${(v) => money(v, v < 10 ? 2 : 0)} xFmt=${bucketFmt}
         emptyText="No profitable windows in this range"
         tooltip=${(d) => html`<div class="t-row"><span class="key-rect" style="background:var(--series-1)"></span><b>${money(d.profit)}</b><span>best case</span></div>
-          <div class="t-row"><span></span><b>${d.windows}</b><span>windows · ${money(d.capital, 0)} capital</span></div>`} />
+          <div class="t-row"><span></span><b>${d.picks}</b><span>picks of ${d.windows} windows · ${money(d.capital, 0)} capital</span></div>`} />
     <//>`;
 }

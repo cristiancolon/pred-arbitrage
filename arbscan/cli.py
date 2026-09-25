@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from . import catalog, config, discover, jev, match, report, rescale, review, scanner, store
+from . import bankroll, catalog, config, discover, jev, match, report, rescale, review, scanner, store
 
 
 def _run(coro):
@@ -83,9 +83,8 @@ def main(argv: list[str] | None = None) -> None:
             cfg = replace(cfg, web_host=args.host or cfg.web_host, web_port=args.port or cfg.web_port)
             _run(serve(cfg, args.config, db, run_scanner=not args.no_scanner))
         elif args.cmd == "report":
-            report.run(db, args.hours, args.min_profit, args.top,
-                       {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
-                        "min_annualized": cfg.sim_min_annualized_return, "max_edge": cfg.sim_max_edge})
+            report.run(db, args.hours, args.min_profit, args.top, cfg.bankroll_usd,
+                       bankroll.PickRules.from_config(cfg))
     except KeyboardInterrupt:
         pass
     finally:

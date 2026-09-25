@@ -21,7 +21,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import jev
+from .. import bankroll, jev
 from ..config import Config
 from ..jobs import RefreshJob
 from ..pairs import remove_pairs
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 CLOSEST_N = 8
-OPEN_N = 20  # open windows sent with every live update; the full list is on the Opportunities page
+OPEN_N = 20  # open windows sent with every live update, best picks first; the rest are on Opportunities
 PAIR_STATUSES = ("live", "paused", "finished")
 PAIR_SORTS = {
     "best": lambda p: max((e for e in (p.get("edges") or {}).values() if e is not None), default=None),
@@ -92,6 +92,7 @@ class Service:
         self.discovery = discovery
         self.pipeline: dict = {}
         self.titles: dict[str, dict] = {}
+        self.rules = bankroll.PickRules.from_config(cfg)
 
     async def read(self, fn: Callable, *args) -> Any:
         def run():
@@ -134,7 +135,14 @@ class Service:
         ranked.sort(key=lambda x: -x[0])
         closest = [{"pair": pid, "direction": d, "edge": e, "relation": s.get("relation"), **self._names(pid)}
                    for e, pid, d, s in ranked[:CLOSEST_N]]
-        open_eps = sorted(sc.episodes.snapshot(), key=lambda e: -e["profit"])
+        now = time.time()
+        open_eps = []
+        for ep in sc.episodes.snapshot():
+            # Judged on the latest quotes: that's what you could act on now.
+            rate = bankroll.annualized(ep["profit"], ep["cost"], ep["days"])
+            why = self.rules.reason(ep["edge"], now - ep["start_ts"], ep["days"], rate)
+            open_eps.append({**ep, "rate": rate, "why": why})
+        open_eps.sort(key=lambda e: (e["why"] is None, e["rate"] or 0.0, e["profit"]), reverse=True)
         return {
             "now": time.time(),
             "scanner": {
@@ -146,6 +154,8 @@ class Service:
             },
             "open": [{**self._names(ep["pair"]), **ep} for ep in open_eps[:OPEN_N]],
             "open_count": len(open_eps),
+            "open_picks": sum(e["why"] is None for e in open_eps),
+            "rules": self.rules.describe(),
             "closest": closest,
             "job": self.job.snapshot(),
             "discovery": self.discovery.snapshot() if self.discovery else None,
@@ -210,10 +220,8 @@ def create_app(svc: Service) -> Starlette:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     async def overview(request: Request) -> Response:
-        cfg = svc.cfg
-        sim = {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
-               "min_annualized": cfg.sim_min_annualized_return, "max_edge": cfg.sim_max_edge}
-        return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90), sim))
+        return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90),
+                                   svc.cfg.bankroll_usd, svc.rules))
 
     async def pairs(request: Request) -> Response:
         """One page of watched pairs, filtered and sorted here: the full list runs to
@@ -264,7 +272,8 @@ def create_app(svc: Service) -> Starlette:
         return JSON({"removed": n})
 
     async def opportunities(request: Request) -> Response:
-        return JSON(await svc.read(queries.opportunities, _float(request, "hours", 24, 0.25, 24 * 90)))
+        return JSON(await svc.read(queries.opportunities, _float(request, "hours", 24, 0.25, 24 * 90), svc.rules,
+                                   request.query_params.get("view") != "all"))
 
     async def jobs(_: Request) -> Response:
         return JSON({"job": svc.job.snapshot(), "log": list(svc.job.log)})

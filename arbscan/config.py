@@ -50,15 +50,17 @@ class Config:
     min_edge: float = 0.0
     # Your total bankroll ($), held half on each venue since each leg is paid for there.
     # Every window is sized to what that buys; 0 means unlimited (full book depth).
-    bankroll_usd: float = 200.0
-    # The dashboard's bankroll simulation takes windows in the order they appeared,
-    # skipping ones open less than this long or returning less than this per year,
-    # and keeps the money tied up until the market resolves...
-    sim_min_window_s: float = 1.0
-    sim_min_annualized_return: float = 0.10
-    # ...and windows whose edge is bigger than this per $1 pair: that usually means a
-    # rules mismatch or a stale quote, not free money.
-    sim_max_edge: float = 0.05
+    bankroll_usd: float = 300.0
+    # Which windows are worth taking ("picks"; see arbscan/bankroll.py). Money is tied
+    # up until a market resolves, so windows are ranked by return per year of lock-up,
+    # and a pick must be open at least pick_min_window_s, resolve within pick_max_days,
+    # return at least pick_min_annualized_return a year (1.0 = 100%), and have an edge
+    # no bigger than pick_max_edge per $1 pair (bigger usually means a rules mismatch
+    # or a stale quote). 0 turns off the days or edge limit.
+    pick_min_window_s: float = 1.0
+    pick_max_days: float = 7.0
+    pick_min_annualized_return: float = 1.0
+    pick_max_edge: float = 0.05
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

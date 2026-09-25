@@ -56,7 +56,7 @@ export function Pipeline() {
       sub=${`${compact(cat.kalshi?.count)} Kalshi · ${compact(cat.pm?.count)} Poly US`}
       foot=${stageRunning("catalog")
         ? html`<${Status} tone="accent" pulse>Downloading · ${duration(now - job.stage_started)}<//>`
-        : liveDisc ? html`<${Status} tone="good" pulse>Live · ${int(discHour)} new in the last hour<//>`
+        : liveDisc ? html`<${Status} tone="good" pulse>Live · ${int(discHour)} new in 1 h<//>`
         : html`<${Status} tone=${stale ? "warning" : "good"}>Updated ${ago(catUpdated, now)}<//>`} />
     <${Stage} icon="match" name="Match" active=${stageRunning("match")} progress=${stageRunning("match")}
       value=${int(p.match?.candidates)} sub=${`suggested pairs · ${int(p.match?.confident)} with matching labels`}

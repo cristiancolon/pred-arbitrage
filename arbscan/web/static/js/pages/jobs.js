@@ -9,7 +9,7 @@ function Discovery({ d, stats, now }) {
   const hour = stats?.hour || {};
   const day = stats?.day || {};
   return html`<${Card} title="Live discovery"
-    sub="Between refreshes, checks both venues for newly listed markets (Kalshi every 15 s, Polymarket US every 30 s), then matches, reviews and pairs them right away.">
+    sub="Between refreshes, picks up newly listed markets (Kalshi as they are announced, or every 15 s; Polymarket US every 30 s), then matches, reviews and pairs them right away.">
     <div class="grid" style="gap:14px">
       <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
         <${Status} tone=${tone} pulse=${d.state === "running"}>${label}<//>

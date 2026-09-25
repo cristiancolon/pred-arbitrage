@@ -12,7 +12,7 @@ import uvicorn
 from . import jev
 from .config import Config
 from .http import make_client
-from .jobs import RefreshJob
+from .jobs import Daemon, RefreshJob
 from .scanner import make_scanner, run_loop
 from .web.app import Hub, Service, create_app
 
@@ -53,9 +53,11 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
     stages = ("catalog", "match") + (("review",) if jev.api_key(cfg) else ())
     job = RefreshJob(os.path.abspath(config_path) if config_path else None,
                      cfg.refresh_interval_h * 3600, last_catalog, hub.publish, stages=stages)
+    discovery = (Daemon(os.path.abspath(config_path) if config_path else None, "discover", "discover",
+                        job._line, hub.publish) if cfg.discovery else None)
     async with make_client() as client:
         scanner = make_scanner(cfg, db, client)
-        svc = Service(cfg, scanner, job, hub)
+        svc = Service(cfg, scanner, job, hub, discovery)
         scanner.listeners.append(svc.on_sweep)
         server = _Server(uvicorn.Config(create_app(svc), host=cfg.web_host, port=cfg.web_port,
                                         log_level="warning", access_log=False, lifespan="off"))
@@ -67,5 +69,7 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
         ]
         if run_scanner:
             tasks.append(run_loop(scanner, stop))
+        if discovery is not None:
+            tasks.append(discovery.run(stop))
         await asyncio.gather(*tasks)
     log.info("stopped")

@@ -59,6 +59,12 @@ class Config:
     web_token: str = ""
     refresh_interval_h: float = 1.0
 
+    # Live discovery (discover.py): between full refreshes, check both venues for newly
+    # listed markets this often and match, review and pair them straight away.
+    discovery: bool = True
+    kalshi_discovery_s: float = 15.0
+    pmus_discovery_s: float = 30.0
+
     catalog_horizon_days: int = 120
     match_min_score: float = 0.45
     auto_approve: tuple[AutoApproveRule, ...] = field(default_factory=tuple)

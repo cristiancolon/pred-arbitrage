@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS jev_reviews (
     PRIMARY KEY (kalshi, pm)
 );
 
+-- Markets found by live discovery (discover.py) between full catalog refreshes.
+CREATE TABLE IF NOT EXISTS discovered (
+    venue TEXT NOT NULL,
+    id TEXT NOT NULL,
+    ts REAL NOT NULL,               -- when discovery added it
+    listed_ts REAL,                 -- when the venue created it
+    candidates INTEGER NOT NULL,    -- suggestions found for it
+    PRIMARY KEY (venue, id)
+);
+CREATE INDEX IF NOT EXISTS discovered_ts ON discovered (ts);
+
 -- Top of book per pair, written only when something changes.
 CREATE TABLE IF NOT EXISTS quotes (
     ts REAL NOT NULL,

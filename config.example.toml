@@ -40,6 +40,12 @@ web_token = ""
 # Jev key) reviews new suggestions. A refresh takes ~2 minutes at low priority.
 refresh_interval_h = 1.0
 
+# Live discovery: between refreshes, check each venue for newly listed markets this
+# often (seconds) and match, review and pair them straight away.
+discovery = true
+kalshi_discovery_s = 15.0
+pmus_discovery_s = 30.0
+
 # Catalog/matching: ignore markets resolving further out than this, and
 # suggestions scoring below this.
 catalog_horizon_days = 120

@@ -42,6 +42,8 @@ export function Pipeline() {
   };
   const rev = p.review || {};
   const jevOn = s.features?.jev;
+  const liveDisc = s.discovery?.state === "running";
+  const discHour = Object.values(p.discovery?.hour || {}).reduce((a, b) => a + b, 0);
   const jv = rev.jev || {};
   const rep = p.report || {};
   const openNow = (s.open || []).length;
@@ -54,6 +56,7 @@ export function Pipeline() {
       sub=${`${compact(cat.kalshi?.count)} Kalshi · ${compact(cat.pm?.count)} Poly US`}
       foot=${stageRunning("catalog")
         ? html`<${Status} tone="accent" pulse>Downloading · ${duration(now - job.stage_started)}<//>`
+        : liveDisc ? html`<${Status} tone="good" pulse>Live · ${int(discHour)} new in the last hour<//>`
         : html`<${Status} tone=${stale ? "warning" : "good"}>Updated ${ago(catUpdated, now)}<//>`} />
     <${Stage} icon="match" name="Match" active=${stageRunning("match")} progress=${stageRunning("match")}
       value=${int(p.match?.candidates)} sub=${`suggested pairs · ${int(p.match?.confident)} with matching labels`}

@@ -53,9 +53,12 @@ class Config:
     bankroll_usd: float = 500.0
     # The dashboard's bankroll simulation takes windows in the order they appeared,
     # skipping ones open less than this long or returning less than this per year,
-    # and keeps the money tied up until the market resolves.
+    # and keeps the money tied up until the market resolves...
     sim_min_window_s: float = 1.0
     sim_min_annualized_return: float = 0.10
+    # ...and windows whose edge is bigger than this per $1 pair: that usually means a
+    # rules mismatch or a stale quote, not free money.
+    sim_max_edge: float = 0.05
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

@@ -66,9 +66,11 @@ def run(db: sqlite3.Connection, hours: float, min_profit: float, top: int, sim: 
     per_day = total / max(span, 3600) * 86400
     print(f"  that is ~${per_day:,.2f}/day at the observed rate, before execution slippage and failed legs")
     if sim and sim.get("bankroll"):
-        r = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"], sim["min_annualized"])
+        r = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"], sim["min_annualized"],
+                              sim.get("max_edge"))
         print(f"  with one ${sim['bankroll']:,.0f} bankroll (stakes tied up until each market resolves; skipping "
-              f"windows open <{sim['min_window_s']:g}s or returning <{100 * sim['min_annualized']:g}%/yr): "
+              f"windows open <{sim['min_window_s']:g}s, returning <{100 * sim['min_annualized']:g}%/yr or with "
+              f"edges over {100 * (sim.get('max_edge') or 1):g}c): "
               f"${r['profit']:,.2f} from {r['taken']} windows, ${r['tied_up']:,.0f} still tied up")
 
     print("\nBy peak edge (profit per $1 pair after fees):")

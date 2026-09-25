@@ -202,7 +202,7 @@ def create_app(svc: Service) -> Starlette:
     async def overview(request: Request) -> Response:
         cfg = svc.cfg
         sim = {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
-               "min_annualized": cfg.sim_min_annualized_return}
+               "min_annualized": cfg.sim_min_annualized_return, "max_edge": cfg.sim_max_edge}
         return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90), sim))
 
     async def pairs(_: Request) -> Response:

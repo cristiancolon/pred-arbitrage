@@ -6,13 +6,13 @@ connections on worker threads, so a slow query never stalls the scanner.
 """
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import orjson
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.datastructures import MutableHeaders
@@ -35,13 +35,19 @@ STATIC = Path(__file__).parent / "static"
 CLOSEST_N = 8
 
 
+def _encode(data: Any) -> bytes:
+    # orjson is ~10x faster than json, which matters because the dashboard shares
+    # the event loop with the price feeds.
+    return orjson.dumps(data, default=str, option=orjson.OPT_NON_STR_KEYS)
+
+
 def _dumps(data: Any) -> str:
-    return json.dumps(data, separators=(",", ":"), default=str)
+    return _encode(data).decode()
 
 
 class JSON(JSONResponse):
     def render(self, content: Any) -> bytes:
-        return _dumps(content).encode()
+        return _encode(content)
 
 
 class Hub:

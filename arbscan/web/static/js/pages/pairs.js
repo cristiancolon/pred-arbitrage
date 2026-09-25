@@ -17,7 +17,8 @@ function bestEdge(p) {
 }
 
 export function Pairs({ params }) {
-  const { data, reload } = useFetch("/api/pairs", [], { refreshOn: (s) => s.pairsVersion });
+  // Refresh with the live stream, but at most every ~5 updates: the list can hold thousands of pairs.
+  const { data, reload } = useFetch("/api/pairs", [], { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
   const [rel, setRel] = useState("all");
@@ -29,7 +30,7 @@ export function Pairs({ params }) {
     .filter((p) => rel === "all" || p.relation === rel)
     .filter((p) => !needle || `${p.k_title} ${p.p_title} ${p.id}`.toLowerCase().includes(needle));
   const finished = all.filter((p) => p.status === "finished").length;
-  const max = 0.05; // fixed ±5¢ scale so bars compare across filters
+  const max = 0.05; // fixed Â±5Â¢ scale so bars compare across filters
   const prune = async () => {
     const r = await api("/api/pairs/remove", { method: "POST", body: { finished: true } });
     toast(`Removed ${r.removed} finished pairs from pairs.csv`);

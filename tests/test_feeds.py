@@ -226,6 +226,7 @@ def test_live_scanner_prices_on_every_update(tmp_path):
     _pm(sc, bids=[(0.50, 15)], offers=[(0.52, 50)])
     st = sc.pair_state["K-1|p-1"]
     assert st["status"] == "live" and st["edges"]["K:YES+P:NO"] > 0
+    sc.out.flush()  # recordings are written by a background thread
     opp = db.execute("SELECT * FROM opportunities").fetchall()
     assert len(opp) == 1 and opp[0]["size"] == 15
     assert ("K-1|p-1", "K:YES+P:NO") in sc.episodes.open
@@ -241,6 +242,8 @@ def test_live_scanner_prices_on_every_update(tmp_path):
     assert "K-1|p-1" in sc.finished and "K-1" not in sc.kfeed.wanted
 
     sc._tick()
+    sc.out.flush()
     row = db.execute("SELECT * FROM sweeps").fetchone()
     assert row["depth_fetches"] >= 1  # evaluations in the window
     assert sc.last_sweep["n_pairs"] == 0
+    sc.out.close()

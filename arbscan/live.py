@@ -57,6 +57,7 @@ class LiveScanner(Scanner):
         self.pm_meta_ts = 0.0
         self.last_opp: dict[tuple[str, str], float] = {}
         self._errors_seen = 0
+        self._meta_pending = False  # pairs changed while a metadata refresh was running
         self._reset_window()
 
     # --- bookkeeping ------------------------------------------------------------
@@ -244,6 +245,18 @@ class LiveScanner(Scanner):
             except Exception:
                 log.exception("tick listener failed")
 
+    async def _refresh_meta_then_price(self) -> None:
+        try:
+            await self.refresh_meta()
+            for p in self._active_pairs():
+                self._evaluate(p)  # new pairs can be priced once their metadata is in
+        except Exception as e:
+            log.warning("metadata refresh failed: %s", e)
+            self.last_error = {"ts": time.time(), "message": f"metadata refresh: {e}"}
+            self.meta_ts = self.pm_meta_ts = time.monotonic()  # retry after the usual interval
+        finally:
+            self._meta_task = None
+
     def feed_state(self) -> dict:
         return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}
 
@@ -267,13 +280,16 @@ class LiveScanner(Scanner):
                 except asyncio.TimeoutError:
                     pass
                 try:
-                    if self.pairs.refresh():
+                    changed = self.pairs.refresh()
+                    if changed:
                         self._reindex()
-                        await self.refresh_meta()
-                        for p in self._active_pairs():
-                            self._evaluate(p)
-                    elif time.monotonic() - min(self.meta_ts, self.pm_meta_ts) > self.cfg.meta_refresh_s:
-                        await self.refresh_meta()
+                    stale = time.monotonic() - min(self.meta_ts, self.pm_meta_ts) > self.cfg.meta_refresh_s
+                    self._meta_pending |= changed
+                    if (self._meta_pending or stale) and self._meta_task is None:
+                        self._meta_pending = False
+                        # REST metadata in the background: the tick (commits, dashboard)
+                        # must keep its one-second rhythm.
+                        self._meta_task = asyncio.create_task(self._refresh_meta_then_price())
                     self._tick()
                 except Exception as e:
                     log.exception("scanner housekeeping failed")

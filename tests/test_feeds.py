@@ -171,11 +171,13 @@ def test_pm_feed_books_state_and_reconnect():
             port = srv.sockets[0].getsockname()[1]
             seed = base64.b64encode(b"\1" * 64).decode()
             feed = PMFeed(f"ws://127.0.0.1:{port}", PMSigner("pid", seed), updates.append)
+            feed.PER_CONN = 120  # the real limit is 10 x 100 markets per connection
             feed.set_markets([f"m-{i}" for i in range(150)])
             stop = asyncio.Event()
             task = asyncio.create_task(feed.run(stop))
             await _wait(lambda: len(feed.books) == 150)
-            assert sorted(len(s["marketSlugs"]) for s in subs) == [50, 100]  # 100 per subscription
+            assert sorted(len(s["marketSlugs"]) for s in subs) == [20, 30, 100]  # 100 per subscription
+            assert len(conns) == 2 and feed.stats.snapshot()["connections"] == 2
             assert subs[0]["subscriptionType"] == "SUBSCRIPTION_TYPE_MARKET_DATA"
             b = feed.books["m-0"]
             assert b.open and b.yes_asks == [(0.52, 50.0)] and b.no_asks == [(0.5, 15.0)]

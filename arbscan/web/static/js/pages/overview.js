@@ -65,12 +65,12 @@ export function Pipeline() {
         : html`<${Status} tone=${p.match?.updated ? "good" : ""}>Updated ${ago(p.match?.updated, now)}<//>`} />
     <${Stage} icon="review" name="Review" active=${stageRunning("review")} progress=${stageRunning("review")}
       value=${int(rev.approved)}
-      sub=${`approved (${int(rev.auto)} by rules${jevOn ? `, ${int(jv.approved)} by Jev` : ""}) · ${int(rev.rejected)} rejected`}
+      sub=${`approved${rev.auto ? ` (${int(rev.auto)} by rules)` : ""} · ${int(rev.rejected)} rejected`}
       foot=${stageRunning("review")
         ? html`<${Status} tone="accent" pulse>Jev reviewing · ${duration(now - job.stage_started)}<//>`
-        : !jevOn ? html`<${Status} tone="warning">No Jev key: ${int(rev.pending)} suggestions unreviewed<//>`
+        : !jevOn ? html`<${Status} tone="warning">No Jev key: ${int(rev.pending)} unreviewed<//>`
         : rev.pending ? html`<${Status}>${int(rev.pending)} waiting for Jev<//>`
-        : html`<span class="muted" style="font-size:12px">Jev rejects any pair it isn't sure of (${int(jv.unsure)} so far)</span>`} />
+        : html`<${Status} tone="good">By Jev · ${int(jv.unsure)} rejected as unsure<//>`} />
     <${Stage} icon="radar" name="Scan" active=${fresh && sc.pairs.total > 0}
       value=${html`${int(sc.pairs.live)}<span class="muted" style="font-size:15px;font-weight:500"> / ${int(sc.pairs.total)}</span>`}
       sub=${`pairs live${sc.pairs.finished ? ` · ${sc.pairs.finished} finished` : ""}${sc.pairs.paused ? ` · ${sc.pairs.paused} paused` : ""}`}

@@ -9,7 +9,7 @@ import sqlite3
 
 import uvicorn
 
-from . import jev
+from . import jev, rescale
 from .config import Config
 from .http import make_client
 from .jobs import Daemon, RefreshJob
@@ -48,6 +48,7 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
+    rescale.ensure(cfg, db)  # before the scanner records anything at the new size
     last_catalog = db.execute("SELECT MAX(updated) FROM markets").fetchone()[0]
     hub = Hub()
     stages = ("catalog", "match") + (("review",) if jev.api_key(cfg) else ())

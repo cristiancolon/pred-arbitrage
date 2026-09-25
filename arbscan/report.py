@@ -5,6 +5,8 @@ import statistics
 import time
 from datetime import datetime
 
+from . import bankroll
+
 EDGE_BUCKETS = [(0.0, 0.005), (0.005, 0.01), (0.01, 0.02), (0.02, 0.05), (0.05, 1.0)]
 SUSPICIOUS_EDGE = 0.05
 SUSPICIOUS_DURATION_S = 3600
@@ -23,7 +25,8 @@ def _dur(s: float) -> str:
     return f"{s / 3600:.1f}h"
 
 
-def run(db: sqlite3.Connection, hours: float, min_profit: float, top: int) -> None:
+def run(db: sqlite3.Connection, hours: float, min_profit: float, top: int, sim: dict | None = None) -> None:
+    """``sim``: bankroll simulation settings (bankroll, min_window_s, min_annualized)."""
     now = time.time()
     since = now - hours * 3600
     sw = db.execute(
@@ -62,6 +65,11 @@ def run(db: sqlite3.Connection, hours: float, min_profit: float, top: int) -> No
           f"on ${capital:,.2f} of capital ({100 * total / capital if capital else 0:.2f}%)")
     per_day = total / max(span, 3600) * 86400
     print(f"  that is ~${per_day:,.2f}/day at the observed rate, before execution slippage and failed legs")
+    if sim and sim.get("bankroll"):
+        r = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"], sim["min_annualized"])
+        print(f"  with one ${sim['bankroll']:,.0f} bankroll (stakes tied up until each market resolves; skipping "
+              f"windows open <{sim['min_window_s']:g}s or returning <{100 * sim['min_annualized']:g}%/yr): "
+              f"${r['profit']:,.2f} from {r['taken']} windows, ${r['tied_up']:,.0f} still tied up")
 
     print("\nBy peak edge (profit per $1 pair after fees):")
     for lo, hi in EDGE_BUCKETS:

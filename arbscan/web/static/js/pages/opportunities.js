@@ -1,5 +1,5 @@
 import { html } from "../vendor/preact-htm.js";
-import { cents, dateTime, days, dirLabel, duration, int, money, navigate, useFetch, usePref } from "../lib.js";
+import { cents, dateTime, days, dirLabel, duration, int, money, navigate, useFetch, usePref, useStore } from "../lib.js";
 import { ChartCard, ColumnChart } from "../charts.js";
 import { Badge, Card, DataTable, Empty, PairName, Seg, Tile } from "../ui.js";
 import { RANGES } from "./overview.js";
@@ -11,6 +11,7 @@ export function Opportunities() {
   const [hours, setHours] = usePref("range", 24);
   const { data, loading } = useFetch(`/api/opportunities?hours=${hours}`, [], { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
   const eps = data?.episodes || [];
+  const bankroll = useStore((s) => s.state?.bankroll);
   const durations = eps.map((e) => e.end_ts - e.start_ts).sort((a, b) => a - b);
   const profit = eps.reduce((a, e) => a + (e.max_profit || 0), 0);
   const capital = eps.reduce((a, e) => a + (e.cost_at_max || 0), 0);
@@ -24,8 +25,11 @@ export function Opportunities() {
     </div>
     <div class="kpis">
       <${Tile} label="Profitable windows" value=${int(data?.total)} foot=${durations.length ? `median ${duration(durations[durations.length >> 1])} open` : "none in this range"} />
-      <${Tile} label="Best-case profit" value=${money(profit)} foot="each window caught once at its peak" />
-      <${Tile} label="Capital needed" value=${money(capital, 0)} foot=${capital ? `${((100 * profit) / capital).toFixed(2)}% return before slippage` : "—"} />
+      <${Tile} label="Best-case profit" value=${money(profit)}
+        foot=${bankroll ? `each window at its peak, sized to your ${money(bankroll, 0)}` : "each window caught once at its peak"} />
+      <${Tile} label=${bankroll ? "Capital, summed over windows" : "Capital needed"} value=${money(capital, 0)}
+        title=${bankroll ? "Each window uses at most your bankroll; windows overlap in time, so one bankroll can't fund all of them. The Overview's bankroll tile simulates that." : ""}
+        foot=${capital ? `${((100 * profit) / capital).toFixed(2)}% return before slippage` : "—"} />
       <${Tile} label="Worth a second look" value=${int(suspicious)} foot="edge ≥ 5¢ or open ≥ 1h: often a rules mismatch" />
     </div>
     <div class="grid cols-2">

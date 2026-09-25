@@ -43,9 +43,11 @@ def top_edge(pa: float | None, a_coef: float, pb: float | None, b_coef: float) -
     return 1.0 - unit_cost(pa, a_coef, pb, b_coef)
 
 
-def walk(a: Leg, b: Leg, min_edge: float = 0.0, max_size: float | None = None) -> ArbResult:
+def walk(a: Leg, b: Leg, min_edge: float = 0.0, max_size: float | None = None,
+         budget_a: float | None = None, budget_b: float | None = None) -> ArbResult:
     """Walk both ask ladders together, taking pairs while each marginal pair clears
-    ``min_edge`` dollars of profit after fees.
+    ``min_edge`` dollars of profit after fees, and while each leg's spend (fees
+    included) stays within its venue's ``budget`` (the cash you hold there).
 
     Size is floored to whole contracts because Polymarket US does not trade fractions.
     """
@@ -55,19 +57,27 @@ def walk(a: Leg, b: Leg, min_edge: float = 0.0, max_size: float | None = None) -
     first = 1.0 - unit_cost(a.asks[0][0], a.fee_coef, b.asks[0][0], b.fee_coef)
     i = j = 0
     rem_a, rem_b = a.asks[0][1], b.asks[0][1]
-    size = cost = 0.0
+    size = cost = spent_a = spent_b = 0.0
     last_unit = None
     while i < len(a.asks) and j < len(b.asks):
-        unit = unit_cost(a.asks[i][0], a.fee_coef, b.asks[j][0], b.fee_coef)
+        pa, pb = a.asks[i][0], b.asks[j][0]
+        unit_a, unit_b = pa + per_contract(a.fee_coef, pa), pb + per_contract(b.fee_coef, pb)
+        unit = unit_a + unit_b
         if 1.0 - unit <= min_edge:
             break
         take = min(rem_a, rem_b)
         if max_size is not None:
             take = min(take, max_size - size)
+        if budget_a is not None:
+            take = min(take, (budget_a - spent_a) / unit_a)
+        if budget_b is not None:
+            take = min(take, (budget_b - spent_b) / unit_b)
         if take <= EPS:
             break
         size += take
         cost += take * unit
+        spent_a += take * unit_a
+        spent_b += take * unit_b
         last_unit = unit
         rem_a -= take
         rem_b -= take

@@ -182,7 +182,8 @@ class LiveScanner(Scanner):
             if e is None or e <= self.cfg.depth_trigger_edge:
                 self.episodes.observe(key, ts, None, days)
                 continue
-            res = walk(Leg(kl, km.fee_coef), Leg(pl, p_coef), self.cfg.min_edge)
+            res = walk(Leg(kl, km.fee_coef), Leg(pl, p_coef), self.cfg.min_edge,
+                       budget_a=self.cfg.leg_budget, budget_b=self.cfg.leg_budget)
             if res.positive and ts - self.last_opp.get(key, 0.0) >= OPPORTUNITY_EVERY_S:
                 self.last_opp[key] = ts
                 n = self.cfg.book_levels_stored

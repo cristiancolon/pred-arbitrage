@@ -133,8 +133,11 @@ export function Overview() {
         foot=${best ? html`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(best.k_title || "").split(" | ")[0]}</span>` : "per $1 pair, after both fees"} />
       <${Tile} label="Profitable windows" value=${int(k.windows)}
         foot=${k.median_duration != null ? `median ${duration(k.median_duration)} open` : "none in this range"} />
-      <${Tile} label="Best-case profit" value=${money(k.profit)}
-        foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />
+      ${data?.sim ? html`<${Tile} label=${`With your ${money(data.sim.bankroll, 0)}`} value=${money(data.sim.profit)}
+          title=${`Simulated best case for one bankroll: windows taken in the order they appeared, skipping any open under ${data.sim.min_window_s} s or returning under ${Math.round(data.sim.min_annualized * 100)}% a year; each stake stays tied up until its market resolves. Assumes both legs fill at the quoted prices.`}
+          foot=${`${int(data.sim.taken)} windows taken · ${money(data.sim.tied_up, 0)} still tied up`} />`
+        : html`<${Tile} label="Best-case profit" value=${money(k.profit)}
+          foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />`}
       ${s?.scanner?.mode === "stream"
         ? html`<${Tile} label="Latency" value=${k.avg_sweep_ms != null ? `${Math.round(k.avg_sweep_ms)} ms` : "—"}
             title="Median time from the exchange's timestamp on a book update to the edge being computed here"
@@ -164,7 +167,7 @@ export function Overview() {
     </div>
 
     <${ChartCard} title="Best-case profit by period"
-      sub=${`Sum of each window's peak profit, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}`}
+      sub=${`Sum of each window's peak profit${data?.sim ? `, each sized to your ${money(data.sim.bankroll, 0)}` : ""}, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}. Windows overlap, so this adds up more than one bankroll could make.`}
       loading=${loading && data}
       table=${{ columns: ["Period", "Windows", "Best-case profit", "Capital"], rows: profit.slice().reverse().map((b) => [bucketFmt(b), b.windows, money(b.profit), money(b.capital, 0)]) }}>
       <${ColumnChart} data=${profit} height=${200} yFmt=${(v) => money(v, v < 10 ? 2 : 0)} xFmt=${bucketFmt}

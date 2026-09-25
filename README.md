@@ -47,6 +47,18 @@ Both venues charge takers `coef × contracts × p × (1 − p)`:
 At 50¢ that is ~1.75¢ per contract on each venue, so a pair needs a gap of ~3.5¢ just
 to break even.
 
+### Sizing to your bankroll
+
+Opportunities are sized to `bankroll_usd` ($500 by default), assumed split evenly
+across the two venues because each leg is paid for on its own venue. A window's size,
+capital and profit are what $250 on each side could buy at that moment. Summing
+windows would still assume a fresh bankroll for each one, so the Overview also
+**simulates one bankroll**: windows are taken in the order they appeared, each stake
+stays tied up until its market resolves, and windows are skipped when they closed
+within `sim_min_window_s` (1 s) or return less than `sim_min_annualized_return` (10%
+a year). Changing the bankroll re-sizes the recorded history at the next start, from
+the order books stored with each observation (`arbscan rescale` does it by hand).
+
 ### What the numbers do *not* include
 
 - **Execution risk.** The two legs can't be filled atomically. By the time you act,

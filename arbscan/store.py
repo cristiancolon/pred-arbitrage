@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS jev_reviews (
     PRIMARY KEY (kalshi, pm)
 );
 
+-- Small key/value state, e.g. which bankroll stored results were sized for.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 -- Markets found by live discovery (discover.py) between full catalog refreshes.
 CREATE TABLE IF NOT EXISTS discovered (
     venue TEXT NOT NULL,

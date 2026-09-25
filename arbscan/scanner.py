@@ -177,24 +177,28 @@ class Scanner:
             self.series_fee.clear()
             self.series_fee_ts = time.monotonic()
         markets = await self.kalshi.markets(tickers)
+        # Series (for fee multipliers) per event: the catalog knows most in one query;
+        # ask the API for the rest, concurrently.
+        events = sorted({m["event_ticker"] for m in markets.values()} - set(self.event_series))
+        for i in range(0, len(events), 500):
+            chunk = events[i : i + 500]
+            for ev, series in self.db.execute(
+                    f"SELECT event_id, series FROM markets WHERE venue = 'K' AND series IS NOT NULL "
+                    f"AND event_id IN ({','.join('?' * len(chunk))})", chunk):
+                self.event_series[ev] = series
+        missing = [ev for ev in events if ev not in self.event_series]
+        for ev, e in zip(missing, await asyncio.gather(*(self.kalshi.event(ev) for ev in missing))):
+            self.event_series[ev] = e["series_ticker"]
+        need = sorted({self.event_series[m["event_ticker"]] for m in markets.values()} - set(self.series_fee))
+        for series, sd in zip(need, await asyncio.gather(*(self.kalshi.series(x) for x in need))):
+            self.series_fee[series] = kalshi_taker_coef(sd.get("fee_type"), sd.get("fee_multiplier"))
         for t in tickers:
             m = markets.get(t)
             if m is None:
                 self._warn_once(f"k-missing:{t}", "Kalshi market %s not found; check pairs.csv", t)
                 self.kmeta[t] = KMeta("missing", None, 0.0)
                 continue
-            ev = m["event_ticker"]
-            if ev not in self.event_series:
-                # The catalog already knows most events' series; ask the API otherwise.
-                row = self.db.execute(
-                    "SELECT series FROM markets WHERE venue = 'K' AND event_id = ? AND series IS NOT NULL LIMIT 1",
-                    (ev,),
-                ).fetchone()
-                self.event_series[ev] = row[0] if row else (await self.kalshi.event(ev))["series_ticker"]
-            series = self.event_series[ev]
-            if series not in self.series_fee:
-                s = await self.kalshi.series(series)
-                self.series_fee[series] = kalshi_taker_coef(s.get("fee_type"), s.get("fee_multiplier"))
+            series = self.event_series[m["event_ticker"]]
             resolve = parse_ts(m.get("expected_expiration_time")) or parse_ts(m.get("close_time"))
             self.kmeta[t] = KMeta(m.get("status") or "", resolve, self.series_fee[series])
         self.meta_ts = time.monotonic()

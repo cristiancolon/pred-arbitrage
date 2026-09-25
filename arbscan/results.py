@@ -14,7 +14,8 @@ Where results come from:
 - ``ResultsRecorder`` reads both venues' REST APIs for every market that has ever
   been paired, had a profitable window or a paper trade: each market once, then
   every ``RECHECK_CLOSED_S`` once it has closed (or the scanner saw it finish), and
-  every ``RECHECK_OPEN_S`` before that, until a result is in. Polymarket US doesn't
+  every ``RECHECK_OPEN_S`` before that, until a result is in; then once a day for
+  three days in case a venue corrects it. Polymarket US doesn't
   publish when it resolved a market, so ``first_final_ts`` (when we first saw the
   result) stands in for it.
 """
@@ -31,6 +32,9 @@ KALSHI_FINAL = {"determined", "settled", "finalized"}
 PM_FINAL = "MARKET_STATUS_RESOLVED"
 RECHECK_CLOSED_S = 600.0
 RECHECK_OPEN_S = 6 * 3600.0
+# Venues occasionally correct a result: re-read results once a day for this long.
+RECHECK_FINAL_S = 86400.0
+FINAL_WATCH_S = 3 * 86400.0
 EVERY_S = 60.0
 BATCH = 500  # markets per recorder pass (several REST requests)
 
@@ -133,12 +137,14 @@ def tracked_markets(db, extra_pairs=()) -> set[tuple[str, str]]:
 
 def due(db, tracked: set[tuple[str, str]], finished: set[tuple[str, str]], now: float) -> list[tuple[str, str]]:
     """Markets to look up now, most overdue first."""
-    known = {(r[0], r[1]): (r[2], r[3], r[4]) for r in db.execute(
-        "SELECT venue, id, yes_value, closed_ts, checked_ts FROM results")}
+    known = {(r[0], r[1]): (r[2], r[3], r[4], r[5]) for r in db.execute(
+        "SELECT venue, id, yes_value, closed_ts, checked_ts, first_final_ts FROM results")}
     out = []
     for key in tracked:
-        yes, closed, checked = known.get(key, (None, None, None))
+        yes, closed, checked, final = known.get(key, (None, None, None, None))
         if yes is not None:
+            if final is not None and now - final < FINAL_WATCH_S and now - checked >= RECHECK_FINAL_S:
+                out.append((checked, key))
             continue
         if checked is None:
             out.append((0.0, key))

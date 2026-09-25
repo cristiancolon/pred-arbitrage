@@ -61,7 +61,8 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
         scanner = make_scanner(cfg, db, client)
         svc = Service(cfg, scanner, job, hub, discovery)
         scanner.listeners.append(svc.on_sweep)
-        server = _Server(uvicorn.Config(create_app(svc), host=cfg.web_host, port=cfg.web_port,
+        # Open dashboards hold event streams; don't let them keep the service from stopping.
+        server = _Server(uvicorn.Config(create_app(svc), host=cfg.web_host, port=cfg.web_port, timeout_graceful_shutdown=3,
                                         log_level="warning", access_log=False, lifespan="off"))
         host = "localhost" if cfg.web_host in ("0.0.0.0", "::") else cfg.web_host
         tasks = [

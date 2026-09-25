@@ -356,7 +356,7 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `markets` | the catalog, including full rules text |
 | `candidates`, `decisions` | matcher output and review decisions (`source`: human, rule or jev) |
 | `jev_reviews` | Jev's verdict, reason and answers for every pair it has read |
-| `paper_trades` | every simulated trade: what was planned, what filled on each venue, fees, unwinds, and the result |
+| `paper_trades` | every simulated trade: what was planned, what filled on each venue, fees, unwinds, the books it saw and met (`books`, top 5 levels per leg), and the result |
 | `discovered` | markets live discovery added between refreshes, with how many suggestions each got |
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |

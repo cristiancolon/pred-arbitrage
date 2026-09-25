@@ -157,7 +157,9 @@ The full refresh runs hourly, but new markets don't wait for it. `arbscan serve`
 keeps a low-priority `arbscan discover` process running, restarting it if it exits.
 It holds both venues' markets in an in-memory index and asks each venue for anything
 listed since its last check: Kalshi every 15 s (`min_created_ts`) and Polymarket US
-every 30 s (`startDateMin`). Each new market is added to the catalog and matched
+every 30 s (`startDateMin`). With a Kalshi API key it also listens to Kalshi's
+lifecycle feed, which announces each market as it is created, and checks Kalshi
+straight away when one arrives. Each new market is added to the catalog and matched
 against the other venue on the spot. Its suggestions go through the auto-approve rules
 and Jev, and approved pairs reach the scanner within a second. So a pair is usually
 being priced within 15–30 s of the second venue listing it, instead of up to an hour

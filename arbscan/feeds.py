@@ -375,16 +375,23 @@ class KalshiFeed(_Feed):
                 self.on_update(t)
 
 
-class PMFeed(_Feed):
-    name = "pmus"
-    CHUNK = 100  # the documented per-subscription maximum
+class _PMConn(_Feed):
+    """One Polymarket US connection. The server allows 10 subscriptions of up to 100
+    markets each per connection ("max subscriptions per connection reached")."""
 
-    def __init__(self, url: str, signer: PMSigner, on_update: Callable[[str], None]):
+    name = "pmus"
+    CHUNK = 100
+    MAX_SUBS = 10
+
+    def __init__(self, url: str, signer: PMSigner, books: dict[str, "PMBook"], on_update: Callable[[str], None],
+                 index: int):
         super().__init__(url, on_update)
         self.signer = signer
-        self.books: dict[str, PMBook] = {}
+        self.books = books  # shared across connections
+        self.index = index
         self._subs: dict[str, list[str]] = {}  # request id -> slugs
         self._slug_sub: dict[str, str] = {}
+        self._owned: set[str] = set()
         self._n = 0
 
     def _headers(self) -> dict[str, str]:
@@ -395,26 +402,31 @@ class PMFeed(_Feed):
         self._slug_sub.clear()
         await self._sync()
 
+    async def _unsubscribe(self, rid: str) -> None:
+        for s in self._subs.pop(rid):
+            self._slug_sub.pop(s, None)
+        await self._send({"unsubscribe": {"requestId": rid}})
+
     async def _sync(self) -> None:
         if self.ws is None:
             return
-        # Subscriptions can't be edited, so drop any that hold unwanted slugs and
-        # re-add their wanted ones alongside new slugs.
-        stale = [rid for rid, slugs in self._subs.items() if any(s not in self.wanted for s in slugs)]
-        readd = []
-        for rid in stale:
-            for s in self._subs.pop(rid):
-                self._slug_sub.pop(s, None)
-                if s in self.wanted:
-                    readd.append(s)
-                else:
-                    self.books.pop(s, None)
-            await self._send({"unsubscribe": {"requestId": rid}})
-        add = sorted(set(readd) | {s for s in self.wanted if s not in self._slug_sub})
+        # Subscriptions can't be edited: drop those holding unwanted markets, then
+        # subscribe what's missing. Repack everything if that would need more than
+        # the server's subscription limit.
+        for rid in [r for r, slugs in self._subs.items() if any(s not in self.wanted for s in slugs)]:
+            await self._unsubscribe(rid)
+        for s in [s for s in self.books if s not in self.wanted and s in self._owned]:
+            self.books.pop(s, None)
+        self._owned = set(self.wanted)
+        add = sorted(s for s in self.wanted if s not in self._slug_sub)
+        if len(self._subs) + -(-len(add) // self.CHUNK) > self.MAX_SUBS:
+            for rid in list(self._subs):
+                await self._unsubscribe(rid)
+            add = sorted(self.wanted)
         for i in range(0, len(add), self.CHUNK):
             chunk = add[i : i + self.CHUNK]
             self._n += 1
-            rid = f"md-{self._n}"
+            rid = f"md-{self.index}-{self._n}"
             self._subs[rid] = chunk
             for s in chunk:
                 self._slug_sub[s] = rid
@@ -425,18 +437,97 @@ class PMFeed(_Feed):
         md = msg.get("marketData")
         if md is not None:
             slug = md.get("marketSlug")
-            if slug not in self.wanted:
-                return
-            book = self.books.setdefault(slug, PMBook())
+            if slug not in self.wanted or msg.get("requestId") not in self._subs:
+                return  # e.g. in flight after an unsubscribe
+            book = self.books.get(slug)
+            if book is None:
+                book = self.books[slug] = PMBook()
             book.update(md, recv)
-            if book.exch_ts:
+            if book.stamped:
                 self.stats.lags.append(recv - book.exch_ts)
             self.on_update(slug)
         elif "error" in msg:
-            log.warning("pmus feed error for %s: %s", msg.get("requestId") or msg.get("request_id"), msg["error"])
+            log.warning("pmus feed error for %s: %s", msg.get("requestId"), msg["error"])
 
     def _disconnected(self) -> None:
-        for s, book in self.books.items():
-            if book.ready:
+        for s in self.wanted:
+            book = self.books.get(s)
+            if book is not None and book.ready:
                 book.ready = False
                 self.on_update(s)
+
+
+class _Combined:
+    """FeedStats-like view over several connections."""
+
+    def __init__(self, conns: list[_PMConn]):
+        self.conns = conns
+
+    @property
+    def reconnects(self) -> int:
+        return sum(c.stats.reconnects for c in self.conns)
+
+    def snapshot(self) -> dict:
+        lags: list[float] = sorted(x for c in self.conns for x in c.stats.lags)
+
+        def q(v: float) -> float | None:
+            return 1000 * lags[min(len(lags) - 1, int(v * len(lags)))] if lags else None
+
+        since = [c.stats.connected_since for c in self.conns]
+        return {"connected": bool(self.conns) and all(t is not None for t in since),
+                "connected_since": max((t for t in since if t), default=None),
+                "messages": sum(c.stats.messages for c in self.conns), "reconnects": self.reconnects,
+                "last_message": max((c.stats.last_message for c in self.conns), default=0.0),
+                "lag_p50_ms": q(0.5), "lag_p90_ms": q(0.9), "connections": len(self.conns)}
+
+
+class PMFeed:
+    """Polymarket US books over as many connections as needed, ~1,000 markets each."""
+
+    name = "pmus"
+    PER_CONN = _PMConn.CHUNK * _PMConn.MAX_SUBS
+
+    def __init__(self, url: str, signer: PMSigner, on_update: Callable[[str], None]):
+        self.url, self.signer, self.on_update = url, signer, on_update
+        self.books: dict[str, PMBook] = {}
+        self.wanted: set[str] = set()
+        self.conns: list[_PMConn] = []
+        self.stats = _Combined(self.conns)
+        self._added = asyncio.Event()
+
+    def _new_conn(self) -> _PMConn:
+        conn = _PMConn(self.url, self.signer, self.books, lambda slug: self.on_update(slug), len(self.conns))
+        self.conns.append(conn)
+        self._added.set()
+        return conn
+
+    def set_markets(self, markets: Iterable[str]) -> None:
+        new = set(markets)
+        if new == self.wanted:
+            return
+        self.wanted = new
+        todo = sorted(new - {s for c in self.conns for s in c.wanted})
+        for c in self.conns:
+            keep = c.wanted & new
+            space = self.PER_CONN - len(keep)
+            c.set_markets(keep | set(todo[:space]))
+            todo = todo[space:]
+        while todo:
+            self._new_conn().set_markets(todo[: self.PER_CONN])
+            todo = todo[self.PER_CONN :]
+
+    async def run(self, stop: asyncio.Event) -> None:
+        tasks: dict[_PMConn, asyncio.Task] = {}
+        stopping = asyncio.create_task(stop.wait())
+        try:
+            while not stop.is_set():
+                for c in self.conns:
+                    if c not in tasks:
+                        tasks[c] = asyncio.create_task(c.run(stop))
+                self._added.clear()
+                added = asyncio.create_task(self._added.wait())
+                await asyncio.wait({added, stopping}, return_when=asyncio.FIRST_COMPLETED)
+                added.cancel()
+        finally:
+            stopping.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)

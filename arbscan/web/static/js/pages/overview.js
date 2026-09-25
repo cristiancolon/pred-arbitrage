@@ -46,7 +46,7 @@ export function Pipeline() {
   const discHour = Object.values(p.discovery?.hour || {}).reduce((a, b) => a + b, 0);
   const jv = rev.jev || {};
   const rep = p.report || {};
-  const openNow = (s.open || []).length;
+  const openNow = s.open_count || 0;
   const stageRunning = (name) => running && job.stage === name;
   return html`<section class="card pipeline" aria-label="Pipeline">
     <${Stage} icon="database" name="Catalog" active=${stageRunning("catalog")} progress=${stageRunning("catalog")}
@@ -63,13 +63,14 @@ export function Pipeline() {
       foot=${stageRunning("match")
         ? html`<${Status} tone="accent" pulse>Matching · ${duration(now - job.stage_started)}<//>`
         : html`<${Status} tone=${p.match?.updated ? "good" : ""}>Updated ${ago(p.match?.updated, now)}<//>`} />
-    <${Stage} icon="review" name="Review" active=${stageRunning("review") || (!jevOn && rev.pending > 0)} progress=${stageRunning("review")}
-      action=${html`<a class="btn ghost sm" href="#/review">Open<${Icon} name="arrow" size=${13} /></a>`}
-      value=${int(rev.pending)}
-      sub=${jevOn ? `pending · ${int(jv.unsure)} Jev unsure · ${int(jv.unreviewed)} not read yet` : "awaiting your review"}
+    <${Stage} icon="review" name="Review" active=${stageRunning("review")} progress=${stageRunning("review")}
+      value=${int(rev.approved)}
+      sub=${`approved (${int(rev.auto)} by rules${jevOn ? `, ${int(jv.approved)} by Jev` : ""}) · ${int(rev.rejected)} rejected`}
       foot=${stageRunning("review")
         ? html`<${Status} tone="accent" pulse>Jev reviewing · ${duration(now - job.stage_started)}<//>`
-        : html`<span class="muted" style="font-size:12px">${int(rev.approved)} approved (${int(rev.auto)} by rules${jevOn ? `, ${int(jv.approved)} by Jev` : ""}) · ${int(rev.rejected)} rejected</span>`} />
+        : !jevOn ? html`<${Status} tone="warning">No Jev key: ${int(rev.pending)} suggestions unreviewed<//>`
+        : rev.pending ? html`<${Status}>${int(rev.pending)} waiting for Jev<//>`
+        : html`<span class="muted" style="font-size:12px">Jev rejects any pair it isn't sure of (${int(jv.unsure)} so far)</span>`} />
     <${Stage} icon="radar" name="Scan" active=${fresh && sc.pairs.total > 0}
       value=${html`${int(sc.pairs.live)}<span class="muted" style="font-size:15px;font-weight:500"> / ${int(sc.pairs.total)}</span>`}
       sub=${`pairs live${sc.pairs.finished ? ` · ${sc.pairs.finished} finished` : ""}${sc.pairs.paused ? ` · ${sc.pairs.paused} paused` : ""}`}
@@ -97,7 +98,7 @@ function OpenList({ open, now }) {
 }
 
 function Closest({ rows }) {
-  if (!rows.length) return html`<${Empty} icon="radar" title="Nothing to rank yet">Approve some pairs and the scanner will rank them by how close they are to breakeven.<//>`;
+  if (!rows.length) return html`<${Empty} icon="radar" title="Nothing to rank yet">Once pairs are approved, the scanner ranks them by how close they are to breakeven.<//>`;
   const max = Math.max(0.02, ...rows.map((r) => Math.abs(r.edge)));
   return html`<div class="list">${rows.map((r) => html`<div class="list-row clickable rank-row" key=${r.pair + r.direction}
       style="grid-template-columns:minmax(0,1fr) 120px 76px" onClick=${() => navigate("pairs", { id: r.pair })}>
@@ -152,12 +153,13 @@ export function Overview() {
       table=${{ columns: ["Time", "Best net edge"], rows: (data?.edge || []).slice().reverse().map((p) => [new Date(p[0] * 1000).toLocaleString(), cents(p[1])]) }}>
       <${LineChart} series=${edgeSeries} height=${240} area endLabel zero=${0} zeroLabel="Breakeven after fees"
         yFmt=${(v) => cents(v, { digits: 1 })} xDomain=${data ? [data.since, now] : undefined}
-        emptyText=${s?.scanner?.pairs?.total ? "Waiting for the first sweeps…" : "No pairs are being watched yet. Approve some in Review."} />
+        emptyText=${s?.scanner?.pairs?.total ? "Waiting for the first sweeps…" : "No pairs are being watched yet."} />
     <//>
 
     <div class="grid cols-2 align-start">
-      <${Card} title="Open opportunities" sub="Profitable after fees right now, walked through both order books" flush
-        actions=${open.length ? html`<span class="badge accent">${open.length} open</span>` : null}>
+      <${Card} title="Open opportunities" flush
+        sub=${`Profitable after fees right now, walked through both order books${s?.open_count > open.length ? `; the ${open.length} most profitable shown` : ""}`}
+        actions=${open.length ? html`<span class="badge accent">${int(s.open_count)} open</span>` : null}>
         ${open.length ? html`<${OpenList} open=${open} now=${now} />` : html`<${Empty} icon="zap" title="No open windows">
           ${best ? html`The closest pair is ${cents(best.edge)} from breakeven.` : "Nothing is profitable after fees right now."}<//>`}
       <//>

@@ -1,8 +1,8 @@
-import { html, useState } from "../vendor/preact-htm.js";
-import { api, cents, dateTime, days, dirLabel, duration, int, money, navigate, price, splitTitle, toast, useFetch, useNow, useStore } from "../lib.js";
+import { html, useEffect, useState } from "../vendor/preact-htm.js";
+import { api, cents, dateTime, days, dirLabel, duration, int, money, navigate, price, splitTitle, toast, useDebounced, useFetch, useNow } from "../lib.js";
 import { ChartCard, LineChart } from "../charts.js";
-import { Badge, Banner, Card, DataTable, DivBar, Drawer, Edge, Empty, Icon, PairName, RelationChip, Seg, Status } from "../ui.js";
-import { Mapping, RulesCompare } from "./review.js";
+import { Badge, Banner, Card, DataTable, DivBar, Drawer, Edge, Empty, Icon, Pager, PairName, RelationChip, Seg, Status } from "../ui.js";
+import { Mapping, RulesCompare } from "../rules.js";
 
 const STATUS = {
   live: { tone: "good", label: "Live" },
@@ -16,20 +16,21 @@ function bestEdge(p) {
   return v.length ? Math.max(...v) : null;
 }
 
+const PAGE = 100;
+
 export function Pairs({ params }) {
-  // Refresh with the live stream, but at most every ~5 updates: the list can hold thousands of pairs.
-  const { data, reload } = useFetch("/api/pairs", [], { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
   const [rel, setRel] = useState("all");
-  const all = data?.pairs || [];
-  const needle = q.trim().toLowerCase();
-  const rows = all
-    .map((p) => ({ ...p, best: bestEdge(p) }))
-    .filter((p) => status === "all" || p.status === status)
-    .filter((p) => rel === "all" || p.relation === rel)
-    .filter((p) => !needle || `${p.k_title} ${p.p_title} ${p.id}`.toLowerCase().includes(needle));
-  const finished = all.filter((p) => p.status === "finished").length;
+  const [sort, setSort] = useState({ key: "best", dir: "desc" });
+  const [offset, setOffset] = useState(0);
+  const needle = useDebounced(q.trim());
+  useEffect(() => setOffset(0), [needle, status, rel, sort]);
+  // The server filters, sorts and pages: the full list runs to thousands of pairs.
+  const query = new URLSearchParams({ status, relation: rel, q: needle, sort: sort.key, dir: sort.dir, offset, limit: PAGE });
+  const { data, reload } = useFetch(`/api/pairs?${query}`, [], { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
+  const counts = data?.counts || {};
+  const rows = (data?.items || []).map((p) => ({ ...p, best: bestEdge(p) }));
   const max = 0.05; // fixed ±5¢ scale so bars compare across filters
   const prune = async () => {
     const r = await api("/api/pairs/remove", { method: "POST", body: { finished: true } });
@@ -37,7 +38,7 @@ export function Pairs({ params }) {
     reload();
   };
   const columns = [
-    { key: "k_title", label: "Market", cls: "market", render: (p) => html`<${PairName} ...${p} />`, sortValue: (p) => p.k_title },
+    { key: "k_title", label: "Market", cls: "market", render: (p) => html`<${PairName} ...${p} />` },
     { key: "relation", label: "Relation", render: (p) => html`<${RelationChip} relation=${p.relation} />` },
     { key: "k", label: "Kalshi YES / NO", cls: "num", sortable: false,
       render: (p) => html`<span class="nowrap">${price(p.k_yes_ask)} <span class="muted">/</span> ${price(p.k_no_ask)}</span>` },
@@ -52,18 +53,18 @@ export function Pairs({ params }) {
     <div class="filters">
       <label class="search"><${Icon} name="search" size=${15} /><input class="input" placeholder="Search markets or tickers" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Search pairs" /></label>
       <${Seg} label="Status" value=${status} onChange=${setStatus} options=${[
-        { value: "all", label: `All ${all.length}` }, { value: "live", label: "Live" }, { value: "paused", label: "Paused" }, { value: "finished", label: "Finished" }]} />
+        { value: "all", label: `All ${int(counts.all)}` }, { value: "live", label: "Live" }, { value: "paused", label: "Paused" }, { value: "finished", label: "Finished" }]} />
       <${Seg} label="Relation" value=${rel} onChange=${setRel} options=${[
         { value: "all", label: "Any" }, { value: "same", label: "Same" }, { value: "inverse", label: "Inverse" }]} />
       <span class="spacer"></span>
-      ${finished > 0 && html`<button class="btn" onClick=${prune} title="Delete pairs whose markets have closed from pairs.csv"><${Icon} name="trash" size=${14} />Remove ${finished} finished</button>`}
+      ${counts.finished > 0 && html`<button class="btn" onClick=${prune} title="Delete pairs whose markets have closed from pairs.csv"><${Icon} name="trash" size=${14} />Remove ${int(counts.finished)} finished</button>`}
     </div>
     <${Card} title="Watched pairs" sub="Live top of book from both venues. Edges are per $1 pair after both taker fees; the better of the two directions is shown." flush>
-      <${DataTable} columns=${columns} rows=${rows} rowKey=${(p) => p.id} onRowClick=${(p) => navigate("pairs", { id: p.id })}
-        initialSort=${{ key: "best", dir: "desc" }}
-        empty=${html`<${Empty} icon="pairs" title=${all.length ? "No pairs match these filters" : "No pairs yet"}
-          action=${!all.length && html`<a class="btn primary" href="#/review">Review suggestions<${Icon} name="arrow" size=${14} /></a>`}>
-          ${all.length ? "" : "Approve suggested pairs in Review, or add rows to pairs.csv. The scanner picks them up on its next sweep."}<//>`} />
+      ${data && html`<${DataTable} columns=${columns} rows=${rows} rowKey=${(p) => p.id} onRowClick=${(p) => navigate("pairs", { id: p.id })}
+        sort=${sort} onSort=${setSort}
+        footer=${html`<${Pager} offset=${offset} limit=${PAGE} total=${data.total} onChange=${setOffset} />`}
+        empty=${html`<${Empty} icon="pairs" title=${counts.all ? "No pairs match these filters" : "No pairs yet"}>
+          ${counts.all ? "" : "Jev approves matching markets as they're suggested, and you can add rows to pairs.csv. The scanner picks them up right away."}<//>`} />`}
     <//>
     ${params.id && html`<${PairDrawer} id=${params.id} onClose=${() => navigate("pairs")} onRemoved=${reload} />`}`;
 }

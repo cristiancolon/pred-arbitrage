@@ -7,7 +7,8 @@ Code turns the answers into a verdict:
 - approve: Jev picks the Polymarket side the matcher proposed, the two markets count
   the same competition and scope, and Polymarket's rules agree with its own title.
 - reject: Jev is confident that neither Polymarket side is the same bet.
-- unsure: anything else. The pair stays in the Review queue with Jev's reason.
+- unsure: anything else. Treated as a rejection: a pair is only watched when Jev is
+  sure it is the same bet. Jev's reason is kept in jev_reviews.
 
 The questions and thresholds below are the part to review and tune. They were tuned
 against jev-1.13.0 on ~200 hand-labelled pairs (every equivalent pair approved, every
@@ -151,7 +152,7 @@ def _pending(cfg: Config, db: sqlite3.Connection) -> list[sqlite3.Row]:
         "SELECT c.kalshi, c.pm, c.relation, c.score, "
         "k.title AS k_title, k.yes_label AS k_yes, k.rules AS k_rules, "
         "p.title AS p_title, p.yes_label AS p_yes, p.no_label AS p_no, p.rules AS p_rules, "
-        "j.relation AS j_relation, j.input_hash AS j_hash "
+        "j.relation AS j_relation, j.input_hash AS j_hash, j.verdict AS j_verdict "
         "FROM candidates c "
         "JOIN markets k ON k.venue = 'K' AND k.id = c.kalshi "
         "JOIN markets p ON p.venue = 'P' AND p.id = c.pm "
@@ -167,6 +168,12 @@ def _markets(r: sqlite3.Row) -> tuple[dict, dict]:
     return k, p
 
 
+def _decide(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, verdict: str, note: str | None = None) -> None:
+    """Only an approval pairs the markets; a rejection or an unsure verdict both reject."""
+    decision = r["relation"] if verdict == "approve" else "reject"
+    decide(cfg, db, r["kalshi"], r["pm"], decision, source="jev", note=note, commit=False)
+
+
 def _apply(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, h: str, resp: dict, dry_run: bool) -> Verdict:
     v = judge(resp["answers"], r["relation"])
     if dry_run:
@@ -176,21 +183,20 @@ def _apply(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, h: str, resp: di
         "tokens, ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (r["kalshi"], r["pm"], r["relation"], h, resp.get("model"), v.verdict, v.reason, json.dumps(v.answers()),
          (resp.get("usage") or {}).get("input_tokens"), time.time()))
-    if v.verdict != "unsure":
-        decision = r["relation"] if v.verdict == "approve" else "reject"
-        p_side = v.side["yes_side" if r["relation"] == "same" else "no_side"]
-        decide(cfg, db, r["kalshi"], r["pm"], decision, source="jev", note=f"jev:{p_side:.2f}", commit=False)
+    p_side = v.side["yes_side" if r["relation"] == "same" else "no_side"]
+    _decide(cfg, db, r, v.verdict, note=f"jev:{p_side:.2f}")
     return v
 
 
 async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, dry_run: bool = False,
                  api: Api | None = None, only: set[tuple[str, str]] | None = None) -> dict:
     """Send every undecided candidate Jev hasn't already read (or whose text changed);
-    with ``only``, just those (kalshi, pm) pairs."""
+    with ``only``, just those (kalshi, pm) pairs. A candidate Jev already read, and
+    whose text hasn't changed, gets its stored verdict without another call."""
     key = api_key(cfg)
     if not key and api is None:
         raise SystemExit("no Jev API key: set jev_api_key in config.toml or TYPESAFE_API_KEY")
-    todo = []
+    todo, known = [], []
     for r in _pending(cfg, db):
         if only is not None and (r["kalshi"], r["pm"]) not in only:
             continue
@@ -198,10 +204,17 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
         body = request_body(k, p, cfg.jev_model)
         h = input_hash(body)
         if r["j_hash"] == h and r["j_relation"] == r["relation"]:
-            continue  # already read this exact pair; its verdict was unsure
-        todo.append((r, body, h))
+            known.append(r)  # already read this exact pair
+        else:
+            todo.append((r, body, h))
     todo = todo[: limit if limit is not None else cfg.jev_max_per_run]
-    stats = {"sent": 0, "approve": 0, "reject": 0, "unsure": 0, "failed": 0, "tokens": 0}
+    stats = {"sent": 0, "approve": 0, "reject": 0, "unsure": 0, "failed": 0, "tokens": 0, "known": 0}
+    if known and not dry_run:
+        for r in known:
+            _decide(cfg, db, r, r["j_verdict"])
+        db.commit()
+        stats["known"] = len(known)
+        log.info("applied Jev's earlier verdicts to %d candidates (unsure counts as a rejection)", len(known))
     if not todo:
         log.info("nothing new for Jev to review")
         return stats
@@ -244,7 +257,7 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
         if stats["sent"] % 50 == 0:
             db.commit()  # progress shows up on the dashboard as it goes
         if stats["sent"] % 250 == 0:
-            log.info("%d/%d reviewed: %d approved, %d rejected, %d left for you", stats["sent"], len(todo),
+            log.info("%d/%d reviewed: %d approved, %d rejected, %d rejected as unsure", stats["sent"], len(todo),
                      stats["approve"], stats["reject"], stats["unsure"])
 
     try:
@@ -255,7 +268,7 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
             await client.aclose()
     if fatal:
         raise SystemExit(fatal[0])
-    log.info("Jev reviewed %d in %.0fs: %d approved, %d rejected, %d left for you%s; %d tokens (~$%.3f)",
+    log.info("Jev reviewed %d in %.0fs: %d approved, %d rejected, %d rejected as unsure%s; %d tokens (~$%.3f)",
              stats["sent"], time.monotonic() - t0, stats["approve"], stats["reject"], stats["unsure"],
              f", {stats['failed']} failed" if stats["failed"] else "", stats["tokens"],
              stats["tokens"] * PRICE_PER_TOKEN)

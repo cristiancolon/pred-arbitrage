@@ -53,7 +53,7 @@ def test_state_and_pairs(env):
     st = client.get("/api/state").json()
     assert st["scanner"]["pairs"]["total"] == 1
     assert st["job"]["state"] == "idle"
-    pairs = client.get("/api/pairs").json()["pairs"]
+    pairs = client.get("/api/pairs").json()["items"]
     assert [p["id"] for p in pairs] == ["K-1|p-1"]
     assert client.get("/").status_code == 200
     assert client.get("/static/js/app.js").headers["cache-control"] == "no-cache"
@@ -70,17 +70,38 @@ def test_opportunities_keep_episode_times(env):
     assert [d["count"] for d in data["durations"]][1] == 1  # 9s -> "5-15s"
 
 
-def test_review_decision_appends_pair(env):
+def test_pairs_are_filtered_sorted_and_paged_on_the_server(env):
     cfg, svc = env
+    append_pair(cfg.pairs_path, "K-2", "p-2", "inverse")
+    append_pair(cfg.pairs_path, "K-3", "p-3", "same")
     svc.scanner.pairs.refresh()
+    svc.scanner.pair_state.update({
+        "K-1|p-1": {"status": "live", "edges": {"a": -0.02, "b": 0.01}},
+        "K-2|p-2": {"status": "paused", "edges": {"a": -0.05, "b": None}},
+    })
+    svc.scanner.finished.add("K-3|p-3")
     client = TestClient(create_app(svc))
-    cands = client.get("/api/candidates?min_score=0.5").json()
-    assert cands["total"] == 1 and cands["items"][0]["k"]["rules"] == "rules for K-2"
-    r = client.post("/api/candidates/decide", json={"kalshi": "K-2", "pm": "p-2", "decision": "same"})
-    assert r.status_code == 200
-    assert {p.id for p in load_pairs(cfg.pairs_path)} == {"K-1|p-1", "K-2|p-2"}
-    assert client.get("/api/candidates?min_score=0.5").json()["total"] == 0
-    assert client.post("/api/candidates/decide", json={"kalshi": "K-2"}).status_code == 400
+
+    def ids(**q):
+        return [p["id"] for p in client.get("/api/pairs", params=q).json()["items"]]
+
+    data = client.get("/api/pairs").json()
+    assert data["counts"] == {"all": 3, "live": 1, "paused": 1, "finished": 1} and data["total"] == 3
+    assert ids() == ["K-1|p-1", "K-2|p-2", "K-3|p-3"]  # best edge first; no edge last
+    assert ids(dir="asc") == ["K-2|p-2", "K-1|p-1", "K-3|p-3"]
+    assert ids(status="finished") == ["K-3|p-3"] and ids(relation="inverse") == ["K-2|p-2"]
+    assert ids(q="P-2") == ["K-2|p-2"]  # tickers and titles, any case
+    page = client.get("/api/pairs", params={"offset": 1, "limit": 1}).json()
+    assert [p["id"] for p in page["items"]] == ["K-2|p-2"] and page["total"] == 3
+
+
+def test_live_updates_carry_only_the_top_open_windows(env, monkeypatch):
+    _, svc = env
+    eps = [{"pair": f"K-{i}|p-{i}", "direction": "K:YES+P:NO", "profit": float(i)} for i in range(30)]
+    monkeypatch.setattr(svc.scanner.episodes, "snapshot", lambda: eps)
+    st = svc.state()
+    assert st["open_count"] == 30 and len(st["open"]) == 20
+    assert st["open"][0]["profit"] == 29.0
 
 
 def test_remove_pairs(env):

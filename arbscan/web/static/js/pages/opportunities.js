@@ -45,7 +45,7 @@ export function Opportunities() {
       <//>
     </div>
     <${Card} title="Windows" sub=${data?.total > 500 ? "Newest 500 shown" : "Newest first; click a row for the pair"} flush>
-      <${DataTable} rows=${eps} rowKey=${(e) => e.pair + e.direction + e.start_ts}
+      <${DataTable} rows=${eps} rowKey=${(e) => e.pair + e.direction + e.start_ts} limit=${100}
         onRowClick=${(e) => navigate("pairs", { id: e.pair })}
         empty=${html`<${Empty} icon="zap" title="No profitable windows yet">When a watched pair becomes profitable after both fees, it shows up here with its size, duration and the capital it needs.<//>`}
         columns=${[

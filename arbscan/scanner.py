@@ -166,6 +166,7 @@ class Scanner:
         self.pair_state: dict[str, dict] = {}
         self.listeners: list[Callable[[], None]] = []
         self._depth_budget = MAX_DEPTH_FETCHES_PER_SWEEP
+        self._meta_task: asyncio.Task | None = None
 
     def _warn_once(self, key: str, msg: str, *args) -> None:
         if key not in self.warned:
@@ -177,9 +178,17 @@ class Scanner:
             self.series_fee.clear()
             self.series_fee_ts = time.monotonic()
         markets = await self.kalshi.markets(tickers)
-        # Series (for fee multipliers) per event: the catalog knows most in one query;
-        # ask the API for the rest, concurrently.
-        events = sorted({m["event_ticker"] for m in markets.values()} - set(self.event_series))
+        # Fee rates: the hourly catalog already has them per market. For markets it
+        # doesn't know, find the series (fee multiplier) per event: the catalog knows
+        # most events too; ask the API for the rest, concurrently.
+        known_fee: dict[str, float] = {}
+        for i in range(0, len(tickers), 500):
+            chunk = tickers[i : i + 500]
+            known_fee.update(self.db.execute(
+                f"SELECT id, fee_coef FROM markets WHERE venue = 'K' AND fee_coef IS NOT NULL "
+                f"AND id IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        unknown = {t: m for t, m in markets.items() if t not in known_fee}
+        events = sorted({m["event_ticker"] for m in unknown.values()} - set(self.event_series))
         for i in range(0, len(events), 500):
             chunk = events[i : i + 500]
             for ev, series in self.db.execute(
@@ -189,7 +198,7 @@ class Scanner:
         missing = [ev for ev in events if ev not in self.event_series]
         for ev, e in zip(missing, await asyncio.gather(*(self.kalshi.event(ev) for ev in missing))):
             self.event_series[ev] = e["series_ticker"]
-        need = sorted({self.event_series[m["event_ticker"]] for m in markets.values()} - set(self.series_fee))
+        need = sorted({self.event_series[m["event_ticker"]] for m in unknown.values()} - set(self.series_fee))
         for series, sd in zip(need, await asyncio.gather(*(self.kalshi.series(x) for x in need))):
             self.series_fee[series] = kalshi_taker_coef(sd.get("fee_type"), sd.get("fee_multiplier"))
         for t in tickers:
@@ -198,10 +207,19 @@ class Scanner:
                 self._warn_once(f"k-missing:{t}", "Kalshi market %s not found; check pairs.csv", t)
                 self.kmeta[t] = KMeta("missing", None, 0.0)
                 continue
-            series = self.event_series[m["event_ticker"]]
+            fee = known_fee[t] if t in known_fee else self.series_fee[self.event_series[m["event_ticker"]]]
             resolve = parse_ts(m.get("expected_expiration_time")) or parse_ts(m.get("close_time"))
-            self.kmeta[t] = KMeta(m.get("status") or "", resolve, self.series_fee[series])
+            self.kmeta[t] = KMeta(m.get("status") or "", resolve, fee)
         self.meta_ts = time.monotonic()
+
+    async def _refresh_meta_bg(self, tickers: list[str]) -> None:
+        try:
+            await self.refresh_kalshi_meta(tickers)
+        except Exception as e:
+            log.warning("Kalshi metadata refresh failed: %s", e)
+            self.meta_ts = time.monotonic()  # try again after the usual interval
+        finally:
+            self._meta_task = None
 
     def _record_quote(self, pair: str, ts: float, k_yes, k_no, p_bid, p_ask, edges) -> None:
         def top(ladder):
@@ -252,10 +270,12 @@ class Scanner:
         self.warned.discard("no-pairs")
 
         tickers = sorted({p.kalshi for p in pairs})
-        stale = time.monotonic() - self.meta_ts > self.cfg.meta_refresh_s
         new = [t for t in tickers if t not in self.kmeta]
-        if stale or new:
-            await self.refresh_kalshi_meta(tickers if stale else new)
+        if new:  # can't price these without their fee and status
+            await self.refresh_kalshi_meta(new)
+        elif time.monotonic() - self.meta_ts > self.cfg.meta_refresh_s and self._meta_task is None:
+            # Routine refresh in the background, so pricing never waits on it.
+            self._meta_task = asyncio.create_task(self._refresh_meta_bg(tickers))
 
         # Each chunk fetches both venues at once and is priced as soon as both answer,
         # so the two sides of a pair are never more than a request apart in time.

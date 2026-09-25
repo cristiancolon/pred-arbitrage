@@ -1,0 +1,52 @@
+# Copy to config.toml and edit. Every key is optional; these are the defaults.
+
+db_path = "data/arbscan.db"
+pairs_path = "pairs.csv"
+
+# Seconds between sweeps. Each sweep costs ~1 Kalshi request per 100 pairs and
+# ~1 Polymarket US request per 100 pairs, plus a few order-book fetches.
+poll_interval_s = 3.0
+
+# Requests per second per venue. Polymarket US's public gateway throttles bursts
+# well below its documented 20/s, so stay conservative.
+kalshi_rps = 5.0
+pmus_rps = 3.0
+
+# Only count contract pairs whose marginal profit after both taker fees is above
+# this many dollars (0.01 = 1c per $1 pair).
+min_edge = 0.0
+
+# If you qualify for Polymarket US's volume rebate on taker fees (10/25/50%).
+pmus_taker_rebate = 0.0
+
+# Dashboard (`arbscan serve`). 0.0.0.0 makes it reachable from other devices on
+# your network; use 127.0.0.1 to keep it local to the Pi. Set web_token to require
+# opening the dashboard once with ?token=<value> (it then sets a cookie).
+web_host = "0.0.0.0"
+web_port = 8787
+web_token = ""
+
+# How often `arbscan serve` re-downloads the catalog and re-runs matching.
+refresh_interval_h = 6.0
+
+# Catalog/matching: ignore markets resolving further out than this, and
+# suggestions scoring below this.
+catalog_horizon_days = 120
+match_min_score = 0.45
+
+# Auto-approve rules: for templated markets whose rulebooks you've compared once
+# by hand, approve every confident, mutual-best match between a Kalshi series and a
+# Polymarket US slug prefix. Games are listed daily, so without rules like these
+# you'd review each one. Inverse pairs (Kalshi "B wins" vs Polymarket "A wins")
+# only hedge when the event can't end another way; set allow_inverse = false for
+# sports with draws unless both venues settle draws the same way.
+#
+# [[auto_approve]]
+# kalshi_series = "KXMLBGAME"      # MLB game winner
+# pm_slug_prefix = "aec-mlb-"
+# min_score = 0.6
+# allow_inverse = true
+#
+# [[auto_approve]]
+# kalshi_series = "KXMLBSPREAD"    # MLB run line
+# pm_slug_prefix = "asc-mlb-"

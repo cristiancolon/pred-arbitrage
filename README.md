@@ -125,6 +125,7 @@ Each stage is also a CLI command:
 ```sh
 .venv/bin/arbscan catalog              # ~1.5 min
 .venv/bin/arbscan match                # ~1 min on a Pi 4
+.venv/bin/arbscan discover             # live discovery; --once for a single check
 .venv/bin/arbscan autoreview           # Jev review; --dry-run to only print verdicts
 .venv/bin/arbscan review               # terminal review; --list to just print
 .venv/bin/arbscan scan                 # scanner only; Ctrl-C to stop
@@ -149,6 +150,24 @@ compared a series' rulebooks yourself (say, Kalshi MLB game winners vs Polymarke
 MLB moneylines), add an `[[auto_approve]]` rule to `config.toml`; see
 `config.example.toml`. Each refresh then approves confident, mutual-best matches for
 that series automatically.
+
+### Live discovery
+
+The full refresh runs hourly, but new markets don't wait for it. `arbscan serve` also
+keeps a low-priority `arbscan discover` process running, restarting it if it exits.
+It holds both venues' markets in an in-memory index and asks each venue for anything
+listed since its last check: Kalshi every 15 s (`min_created_ts`) and Polymarket US
+every 30 s (`startDateMin`). Each new market is added to the catalog and matched
+against the other venue on the spot. Its suggestions go through the auto-approve rules
+and Jev, and approved pairs reach the scanner within a second. So a pair is usually
+being priced within 15–30 s of the second venue listing it, instead of up to an hour
+later.
+
+In testing, the two venues listed ~500 (Kalshi) and ~900 (Polymarket US) markets an
+hour, mostly hourly index/commodity markets and player props with no counterpart, so
+only a few become suggestions. The index takes ~300 MB and is rebuilt after each full
+refresh. Its log shows up with the refresh job's on the **Refresh job** page. Set
+`discovery = false` to turn it off.
 
 ### Automatic review with Jev
 
@@ -257,6 +276,7 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `markets` | the catalog, including full rules text |
 | `candidates`, `decisions` | matcher output and review decisions (`source`: human, rule or jev) |
 | `jev_reviews` | Jev's verdict, reason and answers for every pair it has read |
+| `discovered` | markets live discovery added between refreshes, with how many suggestions each got |
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |
 | `episodes` | contiguous profitable runs: start/end, peak edge, peak profit, capital, days to resolution |

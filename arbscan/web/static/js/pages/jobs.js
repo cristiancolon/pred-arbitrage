@@ -2,6 +2,28 @@ import { html, useEffect, useRef } from "../vendor/preact-htm.js";
 import { ago, api, clock, dateTime, duration, int, toast, until, useFetch, useNow, useStore } from "../lib.js";
 import { Badge, Banner, Card, DataTable, Empty, Icon, Status } from "../ui.js";
 
+function Discovery({ d, stats, now }) {
+  if (!d) return html`<${Card} title="Live discovery"><div class="muted">Off (discovery = false in config.toml).</div><//>`;
+  const tone = { running: "good", restarting: "warning", starting: "accent", stopped: "" }[d.state];
+  const label = { running: "Watching for new markets", restarting: "Restarting", starting: "Starting", stopped: "Stopped" }[d.state];
+  const hour = stats?.hour || {};
+  const day = stats?.day || {};
+  return html`<${Card} title="Live discovery"
+    sub="Between refreshes, checks both venues for newly listed markets (Kalshi every 15 s, Polymarket US every 30 s), then matches, reviews and pairs them right away.">
+    <div class="grid" style="gap:14px">
+      <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+        <${Status} tone=${tone} pulse=${d.state === "running"}>${label}<//>
+        ${d.since && d.state === "running" && html`<span class="muted">since ${dateTime(d.since)}${d.restarts ? ` · ${d.restarts} restarts` : ""}</span>`}
+      </div>
+      <dl class="facts">
+        <dt>Last hour</dt><dd>${int(hour.K || 0)} Kalshi · ${int(hour.P || 0)} Polymarket US new markets</dd>
+        <dt>Last 24 hours</dt><dd>${int(day.K || 0)} Kalshi · ${int(day.P || 0)} Polymarket US · ${int(stats?.suggestions_day)} suggested pairs</dd>
+        <dt>Last found</dt><dd>${stats?.last ? ago(stats.last, now) : "—"}</dd>
+      </dl>
+    </div>
+  <//>`;
+}
+
 const STAGE_INFO = {
   catalog: "Download every open market on both venues",
   match: "Suggest equivalent pairs; apply auto-approve rules",
@@ -10,7 +32,8 @@ const STAGE_INFO = {
 
 export function Jobs() {
   const job = useStore((s) => s.job);
-  const pipeline = useStore((s) => s.state?.pipeline);
+  const state = useStore((s) => s.state);
+  const pipeline = state?.pipeline;
   const logs = useStore((s) => s.logs);
   const { data } = useFetch("/api/jobs");
   const now = useNow(1000);
@@ -70,7 +93,8 @@ export function Jobs() {
           ]} />` : html`<${Empty} icon="jobs" title="No runs yet">Runs since the service started appear here.<//>`}
       <//>
     </div>
-    <${Card} title="Log" sub="Output of the refresh job, streamed live" flush>
+    <${Discovery} d=${state?.discovery} stats=${pipeline?.discovery} now=${now} />
+    <${Card} title="Log" sub="Output of the refresh job and live discovery, streamed live" flush>
       <div class="console" ref=${consoleRef} role="log" aria-live="polite"
         onScroll=${(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30; }}>
         ${lines.length ? lines.map((l) => html`<div class="line"><span class="ts">${clock(l.ts)}</span><span class="stage-tag">${l.stage || "job"}</span><span class="text">${l.text}</span></div>`)

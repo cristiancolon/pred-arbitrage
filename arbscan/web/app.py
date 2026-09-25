@@ -75,11 +75,12 @@ class Hub:
 
 
 class Service:
-    def __init__(self, cfg: Config, scanner: Scanner, job: RefreshJob, hub: Hub):
+    def __init__(self, cfg: Config, scanner: Scanner, job: RefreshJob, hub: Hub, discovery=None):
         self.cfg = cfg
         self.scanner = scanner
         self.job = job
         self.hub = hub
+        self.discovery = discovery
         self.pipeline: dict = {}
         self.titles: dict[str, dict] = {}
 
@@ -137,6 +138,7 @@ class Service:
             "open": sorted(open_eps, key=lambda e: -e["profit"]),
             "closest": closest,
             "job": self.job.snapshot(),
+            "discovery": self.discovery.snapshot() if self.discovery else None,
             "pipeline": self.pipeline,
             "features": {"jev": bool(jev.api_key(self.cfg))},
         }

@@ -30,7 +30,7 @@ import unicodedata
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .config import Config
 from .pairs import append_pair
@@ -319,14 +319,16 @@ def pm_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
                r["start_ts"], r["close_ts"], market_type.startswith("drawable_outcome"))
 
 
-def _rows(db: sqlite3.Connection, venue: str) -> Iterator[sqlite3.Row]:
-    # Skip markets with an empty book on both sides; nothing to arb there.
-    return db.execute(
-        "SELECT id, series, category, title, yes_label, no_label, market_type, start_ts, close_ts, rules "
-        "FROM markets WHERE venue = ? "
-        "AND ((yes_bid IS NOT NULL AND yes_bid > 0) OR (yes_ask IS NOT NULL AND yes_ask < 1))",
-        (venue,),
-    )
+ROW_COLS = "id, series, category, title, yes_label, no_label, market_type, start_ts, close_ts, rules"
+
+
+def _rows(db: sqlite3.Connection, venue: str, quoted: bool = True) -> Iterator[sqlite3.Row]:
+    # Batch matching skips markets with an empty book on both sides; nothing to arb
+    # there. Live discovery keeps them: a market just listed has no quotes yet.
+    sql = f"SELECT {ROW_COLS} FROM markets WHERE venue = ?"
+    if quoted:
+        sql += " AND ((yes_bid IS NOT NULL AND yes_bid > 0) OR (yes_ask IS NOT NULL AND yes_ask < 1))"
+    return db.execute(sql, (venue,))
 
 
 @dataclass(slots=True)
@@ -449,6 +451,96 @@ class Matcher:
                 out.append(c)
         out.sort(key=lambda c: -c.score)
         return out[:KEEP_PER_MARKET]
+
+
+def _compact(d: Doc) -> Doc:
+    d.words, d.yes, d.opp = array("I", sorted(d.words)), array("I", sorted(d.yes)), array("I", sorted(d.opp or ()))
+    return d
+
+
+def _expanded(d: Doc) -> Doc:
+    """A stored Kalshi doc in the set form ``Matcher.score`` expects for its first argument."""
+    return replace(d, words=set(d.words), yes=set(d.yes), opp=set(d.opp), no=())
+
+
+class LiveIndex:
+    """Both venues in memory, for matching markets one at a time as they are listed
+    (discover.py). Built like ``run``, but it keeps the Kalshi docs and indexes them
+    too, so a new Polymarket market can be matched against Kalshi as well as the
+    other way round. Words first seen after the build get IDF weights on the fly;
+    the rebuild after each full catalog refresh re-weights everything."""
+
+    def __init__(self, db: sqlite3.Connection):
+        t0 = time.monotonic()
+        self.vocab = Vocab()
+        pm = [pm_doc(r, self.vocab) for r in _rows(db, "P", quoted=False)]
+        kdocs = [_compact(kalshi_doc(r, self.vocab, count=True)) for r in _rows(db, "K", quoted=False)]
+        self.n_docs = max(1, len(kdocs) + len(pm))
+        self.m = Matcher(pm, self.vocab, self.n_docs)
+        self.p_ids = {d.id for d in pm}
+        self.p_df: Counter[int] = Counter()
+        for d in pm:
+            self.p_df.update(d.words)
+        self.k: list[Doc] = kdocs
+        self.k_ids = {d.id for d in kdocs}
+        self.k_df: Counter[int] = Counter()
+        for d in kdocs:
+            self.k_df.update(d.words)
+            d.norm = self.m.w(d.words)
+        self.k_index: dict[int, array] = defaultdict(lambda: array("I"))
+        for i, d in enumerate(kdocs):
+            for t in d.words:
+                if self.k_df[t] <= MAX_BLOCK_DF:
+                    self.k_index[t].append(i)
+        log.info("live index: %d Kalshi + %d Polymarket US markets in %.0fs", len(kdocs), len(pm),
+                 time.monotonic() - t0)
+
+    def _grow_idf(self) -> None:
+        idf, df = self.m.idf, self.vocab.df
+        while len(idf) < len(df):
+            idf.append(math.log(self.n_docs / max(1, df[len(idf)])))
+
+    def add_kalshi(self, row, min_score: float) -> list[Candidate]:
+        if row["id"] in self.k_ids:
+            return []
+        d = kalshi_doc(row, self.vocab, count=True)
+        self._grow_idf()
+        found = self.m.candidates_for(d, min_score)
+        _compact(d)
+        i = len(self.k)
+        self.k.append(d)
+        self.k_ids.add(d.id)
+        for t in d.words:
+            self.k_df[t] += 1
+            if self.k_df[t] <= MAX_BLOCK_DF:
+                self.k_index[t].append(i)
+        return found
+
+    def add_pm(self, row, min_score: float) -> list[Candidate]:
+        if row["id"] in self.p_ids:
+            return []
+        p = pm_doc(row, self.vocab)
+        self._grow_idf()
+        p.norm = self.m.w(p.words)
+        hits: Counter[int] = Counter()
+        idf = self.m.idf
+        for t in p.words:
+            for i in self.k_index.get(t, ()):
+                hits[i] += idf[t]
+        found = []
+        for i, _ in hits.most_common(MAX_CANDIDATES):
+            c = self.m.score(_expanded(self.k[i]), p)
+            if c and c.score >= min_score:
+                found.append(c)
+        found.sort(key=lambda c: -c.score)
+        j = len(self.m.p)
+        self.m.p.append(p)
+        self.p_ids.add(p.id)
+        for t in p.words:
+            self.p_df[t] += 1
+            if self.p_df[t] <= MAX_BLOCK_DF:
+                self.m.index[t].append(j)
+        return found[:KEEP_PER_MARKET]
 
 
 def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:

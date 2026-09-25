@@ -65,6 +65,13 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
             "WHERE d.kalshi IS NULL")
         if (r[0], r[1]) not in paired
     ]
+    disc = {"hour": dict(db.execute("SELECT venue, COUNT(*) FROM discovered WHERE ts >= ? GROUP BY venue",
+                                     (now - 3600,)).fetchall()),
+            "day": dict(db.execute("SELECT venue, COUNT(*) FROM discovered WHERE ts >= ? GROUP BY venue",
+                                    (now - 86400,)).fetchall()),
+            "suggestions_day": db.execute("SELECT COALESCE(SUM(candidates), 0) FROM discovered WHERE ts >= ?",
+                                          (now - 86400,)).fetchone()[0],
+            "last": db.execute("SELECT MAX(ts) FROM discovered").fetchone()[0]}
     windows, profit, capital = db.execute(
         "SELECT COUNT(*), COALESCE(SUM(max_profit), 0), COALESCE(SUM(cost_at_max), 0) FROM episodes "
         "WHERE start_ts >= ?", (now - 86400,)).fetchone()
@@ -72,6 +79,7 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
         "catalog": {"kalshi": cat.get("K", {"count": 0, "updated": None}),
                     "pm": cat.get("P", {"count": 0, "updated": None})},
         "match": {"candidates": n_cand, "confident": confident, "updated": created},
+        "discovery": disc,
         "review": {"pending": len(pending),
                    "approved": decisions.get("same", 0) + decisions.get("inverse", 0),
                    "rejected": decisions.get("reject", 0), "auto": auto,

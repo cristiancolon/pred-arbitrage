@@ -184,13 +184,16 @@ def _apply(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, h: str, resp: di
 
 
 async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, dry_run: bool = False,
-                 api: Api | None = None) -> dict:
-    """Send every undecided candidate Jev hasn't already read (or whose text changed)."""
+                 api: Api | None = None, only: set[tuple[str, str]] | None = None) -> dict:
+    """Send every undecided candidate Jev hasn't already read (or whose text changed);
+    with ``only``, just those (kalshi, pm) pairs."""
     key = api_key(cfg)
     if not key and api is None:
         raise SystemExit("no Jev API key: set jev_api_key in config.toml or TYPESAFE_API_KEY")
     todo = []
     for r in _pending(cfg, db):
+        if only is not None and (r["kalshi"], r["pm"]) not in only:
+            continue
         k, p = _markets(r)
         body = request_body(k, p, cfg.jev_model)
         h = input_hash(body)

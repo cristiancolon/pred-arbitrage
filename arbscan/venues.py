@@ -33,6 +33,21 @@ class Kalshi:
             if not cursor or not events:
                 return
 
+    async def created_markets(self, since_ts: int) -> list[dict[str, Any]]:
+        """Markets created at or after ``since_ts`` (multivariate combos excluded)."""
+        out: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            params: dict[str, Any] = {"min_created_ts": since_ts, "mve_filter": "exclude", "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            d = await self.api.get("/markets", params)
+            ms = d.get("markets") or []
+            out.extend(ms)
+            cursor = d.get("cursor")
+            if not cursor or not ms:
+                return out
+
     async def all_series(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         cursor = None
@@ -86,6 +101,20 @@ class PolymarketUS:
                 yield ms
             if len(ms) < self.PAGE:
                 return
+            offset += self.PAGE
+
+    async def listed_since(self, start_min: str) -> list[dict[str, Any]]:
+        """Open markets whose ``startDate`` (their listing time) is at or after
+        ``start_min`` (ISO 8601). ``orderBy`` is ignored by the API; this filter isn't."""
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            params = {"limit": self.PAGE, "offset": offset, "active": "true", "closed": "false",
+                      "startDateMin": start_min}
+            ms = (await self.api.get("/v1/markets", params)).get("markets") or []
+            out.extend(ms)
+            if len(ms) < self.PAGE:
+                return out
             offset += self.PAGE
 
     async def markets(self, slugs: list[str]) -> dict[str, dict[str, Any]]:

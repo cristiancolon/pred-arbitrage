@@ -162,3 +162,89 @@ class RefreshJob:
                 await asyncio.wait_for(self._task, timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
+
+
+class Daemon:
+    """Keeps a long-running ``arbscan <command>`` subprocess alive at low priority,
+    streaming its log into the refresh job's log (tagged with ``stage``)."""
+
+    MIN_BACKOFF_S = 5.0
+    MAX_BACKOFF_S = 300.0
+
+    def __init__(self, config_path: str | None, command: str, stage: str,
+                 line: Callable[[str, str | None], None], notify: Callable[[str, dict], None]):
+        self.config_path = config_path
+        self.command = command
+        self.stage = stage
+        self.line = line
+        self.notify = notify
+        self.state = "starting"  # starting | running | restarting | stopped
+        self.since: float | None = None
+        self.restarts = 0
+        self.last_exit: int | None = None
+        self._proc: asyncio.subprocess.Process | None = None
+
+    def argv(self) -> list[str]:
+        args = [sys.executable, "-m", "arbscan"]
+        if self.config_path:
+            args += ["-c", self.config_path]
+        return args + [self.command]
+
+    def snapshot(self) -> dict:
+        return {"state": self.state, "since": self.since, "restarts": self.restarts, "last_exit": self.last_exit}
+
+    def _set(self, state: str) -> None:
+        self.state = state
+        self.notify("daemon", {self.stage: self.snapshot()})
+
+    async def run(self, stop: asyncio.Event) -> None:
+        backoff = self.MIN_BACKOFF_S
+        stopping = asyncio.create_task(stop.wait())
+        try:
+            while not stop.is_set():
+                started = time.monotonic()
+                try:
+                    self._proc = await asyncio.create_subprocess_exec(
+                        *self.argv(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                        preexec_fn=lambda: os.nice(10))
+                except Exception as e:
+                    self.line(f"can't start {self.command}: {e}", self.stage)
+                    rc = -1
+                else:
+                    self.since = time.time()
+                    self._set("running")
+                    reader = asyncio.create_task(self._read(self._proc))
+                    waiter = asyncio.create_task(self._proc.wait())
+                    await asyncio.wait({waiter, stopping}, return_when=asyncio.FIRST_COMPLETED)
+                    if not waiter.done():  # shutting down
+                        self._proc.terminate()
+                        try:
+                            await asyncio.wait_for(waiter, timeout=10)
+                        except asyncio.TimeoutError:
+                            self._proc.kill()
+                    await reader
+                    rc = self._proc.returncode
+                self._proc = None
+                if stop.is_set():
+                    break
+                self.last_exit = rc
+                self.restarts += 1
+                if time.monotonic() - started > 600:
+                    backoff = self.MIN_BACKOFF_S  # it had been running fine
+                self.line(f"{self.command} exited with code {rc}; restarting in {backoff:.0f}s", self.stage)
+                self._set("restarting")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(self.MAX_BACKOFF_S, backoff * 2)
+        finally:
+            stopping.cancel()
+            self._set("stopped")
+
+    async def _read(self, proc: asyncio.subprocess.Process) -> None:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            text = raw.decode(errors="replace").rstrip()
+            if text:
+                self.line(_LOG_PREFIX.sub(_keep_level, text), self.stage)

@@ -25,9 +25,10 @@ from collections import defaultdict
 from .arb import Leg, directions, top_edge, walk
 from .book import top_n
 from .config import Config
+from .dbwriter import DbWriter
 from .feeds import KalshiFeed, PMFeed
 from .pairs import Pair
-from .scanner import KALSHI_FINISHED, PMUS_DEFAULT_COEF, Scanner, parse_ts
+from .scanner import KALSHI_FINISHED, PMUS_DEFAULT_COEF, Episodes, Scanner
 from .venues import Kalshi, PolymarketUS
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,10 @@ class LiveScanner(Scanner):
 
     def __init__(self, cfg: Config, db, kalshi: Kalshi, pm: PolymarketUS, kfeed: KalshiFeed, pfeed: PMFeed):
         super().__init__(cfg, db, kalshi, pm)
+        # Recordings go through a writer thread so SQLite never blocks the feeds;
+        # ``db`` stays for reads.
+        self.out = DbWriter(cfg.db_path)
+        self.episodes = Episodes(self.out)
         self.kfeed, self.pfeed = kfeed, pfeed
         kfeed.on_update, kfeed.on_lifecycle, pfeed.on_update = self._on_kalshi, self._on_lifecycle, self._on_pm
         self.by_ticker: dict[str, list[Pair]] = defaultdict(list)
@@ -180,7 +185,7 @@ class LiveScanner(Scanner):
             if res.positive and ts - self.last_opp.get(key, 0.0) >= OPPORTUNITY_EVERY_S:
                 self.last_opp[key] = ts
                 n = self.cfg.book_levels_stored
-                self.db.execute(
+                self.out.execute(
                     "INSERT INTO opportunities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (ts, pair.id, label, res.top_edge, res.size, res.cost, res.profit, res.last_edge,
                      days, json.dumps(top_n(kl, n)), json.dumps(top_n(pl, n))),
@@ -222,15 +227,16 @@ class LiveScanner(Scanner):
         errors = self.kfeed.stats.reconnects + self.pfeed.stats.reconnects
         new_errors = errors - self._errors_seen
         self._errors_seen = errors
-        self.db.execute("INSERT INTO sweeps (ts, n_pairs, dur_ms, depth_fetches, errors, best_edge, best_pair, "
-                        "best_dir) VALUES (?,?,?,?,?,?,?,?)",
-                        (ts, live, lag_ms, self.w_evals, new_errors, *(best if best else (None, None, None))))
-        self.db.commit()
+        self.out.execute("INSERT INTO sweeps (ts, n_pairs, dur_ms, depth_fetches, errors, best_edge, best_pair, "
+                         "best_dir) VALUES (?,?,?,?,?,?,?,?)",
+                         (ts, live, lag_ms, self.w_evals, new_errors, *(best if best else (None, None, None))))
+        self.out.commit()
         self.sweep_count += 1
         self.last_sweep = {"ts": ts, "dur_ms": lag_ms, "n_pairs": live, "depth_fetches": self.w_evals,
                            "errors": new_errors, "best_edge": best[0] if best else None,
                            "best_pair": best[1] if best else None, "best_dir": best[2] if best else None,
-                           "lag_p90_ms": int(1000 * lags[int(0.9 * (len(lags) - 1))]) if lags else None}
+                           "lag_p90_ms": int(1000 * lags[int(0.9 * (len(lags) - 1))]) if lags else None,
+                           "db_backlog": self.out.backlog}
         self._reset_window()
         for fn in self.listeners:
             try:
@@ -275,5 +281,5 @@ class LiveScanner(Scanner):
         finally:
             await asyncio.gather(*tasks, return_exceptions=True)
             self.episodes.close_all()
-            self.db.commit()
+            self.out.close()
             log.info("streaming scanner stopped")

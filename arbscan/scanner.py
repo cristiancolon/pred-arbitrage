@@ -145,6 +145,7 @@ class Scanner:
     def __init__(self, cfg: Config, db: sqlite3.Connection, kalshi: Kalshi, pm: PolymarketUS):
         self.cfg = cfg
         self.db = db
+        self.out = db  # where recordings go; the streaming scanner swaps in a DbWriter
         self.kalshi = kalshi
         self.pm = pm
         self.pairs = PairFile(cfg.pairs_path)
@@ -227,10 +228,12 @@ class Scanner:
 
         row = (*top(k_yes), *top(k_no), p_bid, p_ask,
                *(round(e, 6) if e is not None else None for e in edges))
-        if self.last_quote.get(pair) == row:
+        # A row per price change (sizes are stored but don't trigger one on their own).
+        key = (row[0], row[2], p_bid, p_ask)
+        if self.last_quote.get(pair) == key:
             return
-        self.last_quote[pair] = row
-        self.db.execute("INSERT INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", (ts, pair, *row))
+        self.last_quote[pair] = key
+        self.out.execute("INSERT INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", (ts, pair, *row))
 
     def _set_state(self, pair: Pair, ts: float, status: str, **fields) -> None:
         st = self.pair_state.setdefault(pair.id, {})

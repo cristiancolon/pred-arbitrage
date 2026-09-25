@@ -168,7 +168,11 @@ class ResultsRecorder:
             k, _, pm = p.partition("|")
             fin |= {("K", k), ("P", pm)}
         todo = await self.read(lambda db: due(db, tracked_markets(db, extra), fin, now))
-        todo = todo[:BATCH]
+        # Half of each pass per venue (the rest to whichever has more waiting).
+        k = [x for x in todo if x[0] == "K"]
+        pm = [x for x in todo if x[0] == "P"]
+        nk = min(len(k), max(BATCH // 2, BATCH - len(pm)))
+        todo = k[:nk] + pm[:BATCH - nk]
         if not todo:
             return 0
         tickers = [i for v, i in todo if v == "K"]

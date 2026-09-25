@@ -221,7 +221,7 @@ class LiveScanner(Scanner):
             if self.paper is not None and res.positive:
                 ep = self.episodes.open.get(key)
                 self.paper.consider(pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days,
-                                    ep.start_ts if ep else ts, seen if seen is not None else ts)
+                                    ep.start_ts if ep else ts, seen if seen is not None else ts, res)
 
         p_bid = round(1 - p_no[0][0], 4) if p_no else None
         p_ask = p_yes[0][0] if p_yes else None

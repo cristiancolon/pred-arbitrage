@@ -112,3 +112,27 @@ def test_windows_survive_a_quick_restart(tmp_path):
     assert rows["A|a"]["start_ts"] == pytest.approx(NOW - 60) and rows["A|a"]["max_profit"] == 3.0
     assert rows["A|a"]["n_obs"] == 2
     assert rows["B|b"]["end_ts"] == pytest.approx(NOW - 60)
+
+
+def test_first_pass_covers_both_venues(tmp_path, monkeypatch):
+    db = connect(str(tmp_path / "b.db"))
+    for i in range(10):
+        db.execute("INSERT INTO decisions (kalshi, pm, decision, ts, source) VALUES (?, ?, 'same', 0, 'jev')",
+                   (f"K-{i}", f"p-{i}"))
+    db.commit()
+    asked = {"K": 0, "P": 0}
+
+    class Venue:
+        def __init__(self, v):
+            self.v = v
+
+        async def markets(self, ids):
+            asked[self.v] += len(ids)
+            return {}
+
+    async def run(fn):
+        return fn(db)
+
+    monkeypatch.setattr(results, "BATCH", 8)
+    asyncio.run(results.ResultsRecorder(run, run, Venue("K"), Venue("P")).step())
+    assert asked == {"K": 4, "P": 4}

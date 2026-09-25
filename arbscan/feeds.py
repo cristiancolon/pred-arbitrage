@@ -50,7 +50,7 @@ def _complement(bids: dict[float, float]) -> list[Level]:
 
 
 class KalshiBook:
-    __slots__ = ("yes", "no", "ready", "exch_ts", "recv_ts", "_ladders")
+    __slots__ = ("yes", "no", "ready", "exch_ts", "recv_ts", "stamped", "_ladders")
 
     def __init__(self) -> None:
         self.yes: dict[float, float] = {}  # YES bids: price -> contracts
@@ -58,12 +58,13 @@ class KalshiBook:
         self.ready = False
         self.exch_ts: float | None = None
         self.recv_ts = 0.0
+        self.stamped = False  # the last change carried the exchange's own timestamp
         self._ladders: tuple[list[Level], list[Level]] | None = None
 
     def snapshot(self, msg: dict, recv: float) -> None:
         self.yes = _levels(msg.get("yes_dollars_fp"))
         self.no = _levels(msg.get("no_dollars_fp"))
-        self.ready, self.recv_ts, self._ladders = True, recv, None
+        self.ready, self.recv_ts, self.stamped, self._ladders = True, recv, False, None
 
     def delta(self, msg: dict, recv: float) -> None:
         side = self.yes if msg.get("side") == "yes" else self.no
@@ -74,6 +75,7 @@ class KalshiBook:
         else:
             side.pop(p, None)
         ts_ms = msg.get("ts_ms")
+        self.stamped = bool(ts_ms)
         self.exch_ts = ts_ms / 1000 if ts_ms else self.exch_ts
         self.recv_ts, self._ladders = recv, None
 
@@ -85,7 +87,7 @@ class KalshiBook:
 
 
 class PMBook:
-    __slots__ = ("yes_asks", "no_asks", "state", "ready", "exch_ts", "recv_ts")
+    __slots__ = ("yes_asks", "no_asks", "state", "ready", "exch_ts", "recv_ts", "stamped")
 
     def __init__(self) -> None:
         self.yes_asks: list[Level] = []
@@ -94,14 +96,17 @@ class PMBook:
         self.ready = False
         self.exch_ts: float | None = None
         self.recv_ts = 0.0
+        self.stamped = False
 
     def update(self, md: dict, recv: float) -> None:
         self.yes_asks, self.no_asks = pmus_ladders(md)
         self.state = md.get("state") or self.state
+        self.stamped = False
         t = md.get("transactTime")
         if t:
             try:
                 self.exch_ts = datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+                self.stamped = self.ready  # the first message after subscribing is a snapshot
             except ValueError:
                 pass
         self.ready, self.recv_ts = True, recv
@@ -196,6 +201,8 @@ class _Feed:
                 self._disconnected()
             if stop.is_set():
                 break
+            if getattr(self, "_gap", False):
+                delay = 0.2  # we closed on purpose to resync; come straight back
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -226,8 +233,14 @@ class _Feed:
 
 
 class KalshiFeed(_Feed):
+    """Kalshi merges every orderbook subscribe on a connection into one subscription
+    (later subscribes are acknowledged with ``ok`` and the full market list), and
+    every message on it, acknowledgements included, takes the next sequence number.
+    One subscription held 6,000 markets in testing, with all snapshots in ~1 s, so on
+    a sequence gap the feed simply reconnects for fresh snapshots of everything."""
+
     name = "kalshi"
-    CHUNK = 200  # markets per orderbook subscription
+    CHUNK = 500  # markets per subscribe command
 
     def __init__(self, url: str, signer: KalshiSigner, on_update: Callable[[str], None],
                  on_lifecycle: Callable[[dict], None] | None = None):
@@ -235,12 +248,14 @@ class KalshiFeed(_Feed):
         self.signer = signer
         self.on_lifecycle = on_lifecycle
         self.books: dict[str, KalshiBook] = {}
-        self._id = 0
-        self._pending: dict[int, tuple[str, list[str]]] = {}  # command id -> (kind, tickers)
-        self._sid_markets: dict[int, set[str]] = {}
-        self._ticker_sid: dict[str, int] = {}
-        self._seq: dict[int, int] = {}
         self.rejected: set[str] = set()  # tickers Kalshi refused to subscribe to on their own
+        self._id = 0
+        self._pending: dict[int, list[str]] = {}  # orderbook subscribe command id -> tickers
+        self._lifecycle_id: int | None = None
+        self._book_sid: int | None = None
+        self._requested: set[str] = set()
+        self._last_seq: int | None = None
+        self._gap = False
 
     def _headers(self) -> dict[str, str]:
         return self.signer.headers("GET", KALSHI_WS_PATH)
@@ -251,13 +266,13 @@ class KalshiFeed(_Feed):
 
     async def _on_connect(self) -> None:
         self._pending.clear()
-        self._sid_markets.clear()
-        self._ticker_sid.clear()
-        self._seq.clear()
+        self._requested.clear()
+        self._book_sid = self._last_seq = None
+        self._gap = False
         if self.on_lifecycle:
-            cid = self._next_id()
-            self._pending[cid] = ("lifecycle", [])
-            await self._send({"id": cid, "cmd": "subscribe", "params": {"channels": ["market_lifecycle_v2"]}})
+            self._lifecycle_id = self._next_id()
+            await self._send({"id": self._lifecycle_id, "cmd": "subscribe",
+                              "params": {"channels": ["market_lifecycle_v2"]}})
         await self._sync()
 
     async def _subscribe(self, tickers: list[str], size: int | None = None) -> None:
@@ -265,56 +280,51 @@ class KalshiFeed(_Feed):
         for i in range(0, len(tickers), size):
             chunk = tickers[i : i + size]
             cid = self._next_id()
-            self._pending[cid] = ("book", chunk)
-            for t in chunk:
-                self._ticker_sid[t] = -cid  # subscribing
+            self._pending[cid] = chunk
+            self._requested.update(chunk)
             await self._send({"id": cid, "cmd": "subscribe",
                               "params": {"channels": ["orderbook_delta"], "market_tickers": chunk}})
 
     async def _sync(self) -> None:
         if self.ws is None:
             return
-        add = sorted(t for t in self.wanted if t not in self._ticker_sid and t not in self.rejected)
-        drop = [t for t in self._ticker_sid if t not in self.wanted and self._ticker_sid[t] > 0]
-        by_sid: dict[int, list[str]] = {}
-        for t in drop:
-            by_sid.setdefault(self._ticker_sid.pop(t), []).append(t)
-            self.books.pop(t, None)
-        for sid, ts in by_sid.items():
-            self._sid_markets[sid] -= set(ts)
-            await self._send({"id": self._next_id(), "cmd": "update_subscription",
-                              "params": {"sids": [sid], "market_tickers": ts, "action": "delete_markets"}})
+        drop = sorted(t for t in self._requested if t not in self.wanted)
+        if drop and self._book_sid is not None:
+            self._requested.difference_update(drop)
+            for t in drop:
+                self.books.pop(t, None)
+            for i in range(0, len(drop), self.CHUNK):
+                await self._send({"id": self._next_id(), "cmd": "update_subscription",
+                                  "params": {"sids": [self._book_sid], "market_tickers": drop[i : i + self.CHUNK],
+                                             "action": "delete_markets"}})
+        add = sorted(t for t in self.wanted if t not in self._requested and t not in self.rejected)
         if add:
             await self._subscribe(add)
 
-    async def _resubscribe(self, sid: int) -> None:
-        tickers = sorted(self._sid_markets.pop(sid, set()))
-        self._seq.pop(sid, None)
-        for t in tickers:
-            self._ticker_sid.pop(t, None)
-            if t in self.books:
-                self.books[t].ready = False
+    def _gap_detected(self, last: int, seq: int) -> None:
+        if self._gap:
+            return
+        self._gap = True
+        log.warning("kalshi feed: sequence gap (%s -> %s); reconnecting for fresh books", last, seq)
+        for t, book in self.books.items():
+            if book.ready:
+                book.ready = False
                 self.on_update(t)
-        await self._send({"id": self._next_id(), "cmd": "unsubscribe", "params": {"sids": [sid]}})
-        await self._subscribe([t for t in tickers if t in self.wanted])
-
-    def _check_seq(self, msg: dict) -> bool:
-        sid, seq = msg.get("sid"), msg.get("seq")
-        if sid is None or seq is None:
-            return True
-        last = self._seq.get(sid)
-        self._seq[sid] = seq
-        if last is not None and seq != last + 1:
-            log.warning("kalshi feed: sequence gap on subscription %s (%s -> %s); resubscribing", sid, last, seq)
-            asyncio.get_running_loop().create_task(self._resubscribe(sid))
-            return False
-        return True
+        if self.ws is not None:
+            asyncio.get_running_loop().create_task(self.ws.close())
 
     def _handle(self, msg: dict, recv: float) -> None:
         kind = msg.get("type")
+        sid, seq = msg.get("sid"), msg.get("seq")
+        if self._book_sid is None and kind in ("orderbook_snapshot", "orderbook_delta"):
+            self._book_sid = sid
+        if sid is not None and sid == self._book_sid and seq is not None:
+            if self._last_seq is not None and seq != self._last_seq + 1:
+                self._gap_detected(self._last_seq, seq)
+            self._last_seq = seq
+        if self._gap:
+            return
         if kind == "orderbook_delta":
-            if not self._check_seq(msg):
-                return
             body = msg["msg"]
             t = body["market_ticker"]
             book = self.books.get(t)
@@ -325,7 +335,6 @@ class KalshiFeed(_Feed):
                 self.stats.lags.append(recv - book.exch_ts)
             self.on_update(t)
         elif kind == "orderbook_snapshot":
-            self._check_seq(msg)
             body = msg["msg"]
             t = body["market_ticker"]
             if t not in self.wanted:
@@ -337,36 +346,27 @@ class KalshiFeed(_Feed):
             if self.on_lifecycle and body.get("market_ticker") in self.wanted:
                 self.on_lifecycle(body)
         elif kind == "subscribed":
-            kind_, tickers = self._pending.pop(msg.get("id"), ("", []))
-            sid = (msg.get("msg") or {}).get("sid")
-            if kind_ == "book" and sid is not None:
-                self._sid_markets[sid] = set(tickers)
-                for t in tickers:
-                    self._ticker_sid[t] = sid
+            if msg.get("id") in self._pending:
+                self._pending.pop(msg.get("id"))
+                self._book_sid = (msg.get("msg") or {}).get("sid", self._book_sid)
+        elif kind == "ok":
+            self._pending.pop(msg.get("id"), None)
         elif kind == "error":
             err = msg.get("msg") or {}
-            kind_, tickers = self._pending.pop(msg.get("id"), ("", []))
-            if err.get("code") == 26 and kind_ == "book" and len(tickers) > 1:
-                # Too many markets for one subscription: split it.
-                self.CHUNK = max(1, len(tickers) // 2)
-                log.info("kalshi feed: subscription market limit hit; using %d per subscription", self.CHUNK)
-                for t in tickers:
-                    self._ticker_sid.pop(t, None)
-                self._changed.set()
-            elif kind_ == "book" and tickers:
-                for t in tickers:
-                    self._ticker_sid.pop(t, None)
-                if len(tickers) == 1:
-                    self.rejected.add(tickers[0])
-                    log.warning("kalshi feed: can't subscribe to %s (%s: %s)", tickers[0], err.get("code"), err.get("msg"))
-                else:
-                    # Find the market(s) Kalshi objects to by splitting the batch.
-                    half = len(tickers) // 2
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._subscribe(tickers[:half], half))
-                    loop.create_task(self._subscribe(tickers[half:], len(tickers) - half))
-            else:
+            tickers = self._pending.pop(msg.get("id"), [])
+            if not tickers:
                 log.warning("kalshi feed error %s: %s", err.get("code"), err.get("msg"))
+                return
+            self._requested.difference_update(tickers)
+            if len(tickers) == 1:
+                self.rejected.add(tickers[0])
+                log.warning("kalshi feed: can't subscribe to %s (%s: %s)", tickers[0], err.get("code"), err.get("msg"))
+            else:
+                # Find the market(s) Kalshi objects to by splitting the batch.
+                half = len(tickers) // 2
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._subscribe(tickers[:half], half))
+                loop.create_task(self._subscribe(tickers[half:], len(tickers) - half))
 
     def _disconnected(self) -> None:
         for t, book in self.books.items():

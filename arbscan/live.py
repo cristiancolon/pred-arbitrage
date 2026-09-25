@@ -118,10 +118,17 @@ class LiveScanner(Scanner):
     def _on_kalshi(self, ticker: str) -> None:
         for p in self.by_ticker.get(ticker, ()):
             self._evaluate(p)
+        self._lag(self.kfeed.books.get(ticker))
 
     def _on_pm(self, slug: str) -> None:
         for p in self.by_slug.get(slug, ()):
             self._evaluate(p)
+        self._lag(self.pfeed.books.get(slug))
+
+    def _lag(self, book) -> None:
+        """Exchange timestamp of the change just handled -> its pairs finished pricing."""
+        if book is not None and book.stamped and book.exch_ts:
+            self.w_lags.append(time.time() - book.exch_ts)
 
     def _on_lifecycle(self, msg: dict) -> None:
         t = msg.get("market_ticker")
@@ -186,9 +193,6 @@ class LiveScanner(Scanner):
                         edges={label: e for (label, _, _), e in zip(directions(pair.relation), edges)},
                         reason=None)
         self.w_evals += 1
-        exch = max(kb.exch_ts or 0.0, pb.exch_ts or 0.0)
-        if exch:
-            self.w_lags.append(time.time() - exch)
 
     @staticmethod
     def _pause_reason(km, kb, pb) -> str:

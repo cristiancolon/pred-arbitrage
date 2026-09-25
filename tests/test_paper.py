@@ -62,6 +62,7 @@ class Harness:
     """A paper trader on in-memory books with a fixed, known latency."""
 
     def __init__(self, tmp_path, **cfg):
+        cfg.setdefault("paper_lead_venue", "")  # both legs at once unless a test says otherwise
         self.cfg = Config(db_path=str(tmp_path / "p.db"), bankroll_usd=cfg.pop("bankroll", 300), **cfg)
         self.db = connect(self.cfg.db_path)
         self.lat = LatencyModel(lambda v: [0.02] if v == "K" else [0.05], random.Random(1))
@@ -142,6 +143,42 @@ def test_liquidity_gone_by_arrival_is_chased_then_unwound(tmp_path):
     assert t["locked_profit"] < t["planned_profit"]
     books = json.loads(t["books"])  # what it saw when deciding, and what each order met on arrival
     assert books["seen"]["P"][0] == [0.5, 100.0] and books["met"]["P"][0] == [0.5, 30.0]
+
+
+def test_polymarket_first_turns_a_stale_quote_into_a_miss(tmp_path):
+    h = Harness(tmp_path, paper_lead_venue="P")
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        # Polymarket's quote is gone before our order lands (~80 ms): the Kalshi leg is never sent.
+        h.pbooks["p-1"].update({"bids": [{"px": {"value": "0.46"}, "qty": "100"}], "state": "MARKET_STATE_OPEN"},
+                               time.time())
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert (t["status"], t["k_qty"], t["p_qty"], t["k_delay_ms"]) == ("missed", 0, 0, None)
+    assert h.trader.cash == {"K": 150, "P": 150}
+
+
+def test_polymarket_first_sizes_kalshi_to_what_filled(tmp_path):
+    h = Harness(tmp_path, paper_lead_venue="P")
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        h.pbooks["p-1"].update({"bids": [{"px": {"value": "0.50"}, "qty": "30"}], "state": "MARKET_STATE_OPEN"},
+                               time.time())
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert (t["k_qty"], t["p_qty"], t["unwind_qty"]) == (30, 30, 0)
+    # Kalshi's order goes out when Polymarket's report is back: 60 ms round trip + 40 ms to Kalshi's book.
+    assert t["p_delay_ms"] == pytest.approx(80, abs=5) and t["k_delay_ms"] == pytest.approx(120, abs=10)
 
 
 def test_nothing_filled_is_a_miss_and_frees_the_cash(tmp_path):

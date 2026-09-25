@@ -46,6 +46,7 @@ pick_max_stake = 0.5               # one pick uses at most this share of a venue
 # See the Paper trading page and README.
 paper_trading = true
 paper_min_profit_usd = 0.01        # skip picks expected to make less than this
+paper_lead_venue = "P"             # send this leg first, the other only for what filled ("" = both at once)
 latency_probe_s = 15.0             # re-measure order round trips this often (read-only requests)
 
 # If you qualify for Polymarket US's volume rebate on taker fees (10/25/50%).

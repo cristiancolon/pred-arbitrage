@@ -4,8 +4,11 @@ When the streaming scanner prices a pick (bankroll.PickRules; the time-open rule
 replaced by real latency here), the paper trader acts on it like a live bot would:
 
 1. Size the pair from the cash on each venue (``bankroll_usd`` split in two, plus
-   whatever settled trades returned there) and send both legs at once as
-   immediate-or-cancel limit orders at the worst price it needs on each book.
+   whatever settled trades returned there) and send immediate-or-cancel limit
+   orders at the worst price it needs on each book: the ``paper_lead_venue`` leg
+   first (Polymarket US by default, whose quotes are likelier to be gone by the time
+   an order lands), and the other leg for what that filled once its report is back
+   (or both at once, if ``paper_lead_venue`` is empty).
 2. Each leg fills against that venue's live book as it stood when the order would
    have arrived (latency.LatencyModel: our decision time + half a measured round
    trip + how far the feed runs behind the exchange). Whatever others took or
@@ -275,13 +278,31 @@ class PaperTrader:
             t["k_delay_ms"], t["p_delay_ms"] = 1000 * d["K"].look, 1000 * d["P"].look
 
             met: dict = {}
+            limits = {"K": t["k_limit"], "P": t["p_limit"]}
+            lead = self.cfg.paper_lead_venue if self.cfg.paper_lead_venue in VENUES else None
 
-            async def leg(v: str, limit: float) -> Fill:
-                await self._at(t0 + d[v].look)
-                return self._fill(v, mk[v], side[v], t["planned_size"], limit, coef[v], reserve[v], met)
+            async def leg(v: str, qty: float, at: float) -> Fill:
+                await self._at(at)
+                return self._fill(v, mk[v], side[v], qty, limits[v], coef[v], reserve[v], met)
 
-            fills = dict(zip(VENUES, await asyncio.gather(leg("K", t["k_limit"]), leg("P", t["p_limit"]))))
-            await self._at(t0 + max(d["K"].reply, d["P"].reply))  # both fill reports are back
+            if lead is None:  # both legs at once
+                fills = dict(zip(VENUES, await asyncio.gather(leg("K", t["planned_size"], t0 + d["K"].look),
+                                                              leg("P", t["planned_size"], t0 + d["P"].look))))
+                await self._at(t0 + max(d["K"].reply, d["P"].reply))  # both fill reports are back
+            else:
+                # The lead leg first; the other only for what it filled, once its report is back.
+                follow = "P" if lead == "K" else "K"
+                fills = {lead: await leg(lead, t["planned_size"], t0 + d[lead].look)}
+                await self._at(t0 + d[lead].reply)
+                if fills[lead].qty >= 1:
+                    t1 = time.monotonic()
+                    df = self.latency.delay(follow)
+                    fills[follow] = await leg(follow, fills[lead].qty, t1 + df.look)
+                    t[f"{follow.lower()}_delay_ms"] = 1000 * (t1 - t0 + df.look)
+                    await self._at(t1 + df.reply)
+                else:
+                    fills[follow] = Fill()
+                    t[f"{follow.lower()}_delay_ms"] = None
             for v in VENUES:
                 self.reserved[v] -= reserve[v]
             reserve = {"K": 0.0, "P": 0.0}

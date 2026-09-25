@@ -89,8 +89,13 @@ the way a bot on this machine would, and fills against the live books:
 
 1. **Decide** from the books as seen: size the pair from the cash on each venue
    (`bankroll_usd` split in two, plus whatever settled trades paid out there), and
-   send both legs at once as immediate-or-cancel limit orders at the worst price the
-   size needs.
+   send immediate-or-cancel limit orders at the worst price the size needs:
+   Polymarket US's leg first, and Kalshi's only for what that filled, once its fill
+   report is back (`paper_lead_venue`; `""` sends both at once). In the first half
+   hour with both at once, 21 of 26 failed picks were a Polymarket quote that had
+   moved by the time the order landed, mostly in live games, and unwinding the
+   Kalshi leg cost $26.65 against $6.41 expected. Leading with Polymarket turns those
+   into misses that cost nothing.
 2. **Arrive** after the measured latency. Each leg fills against that venue's book as
    it stood when the order would have reached the exchange: decision time, plus half
    a round trip to the venue's order API, plus how far our feed runs behind the

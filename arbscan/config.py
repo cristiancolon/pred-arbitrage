@@ -72,6 +72,10 @@ class Config:
     # every latency_probe_s with read-only requests (see arbscan/latency.py).
     paper_trading: bool = True
     paper_min_profit_usd: float = 0.01
+    # Send this venue's leg first and the other only for what it filled ("P", "K"), or
+    # "" to send both at once. Polymarket US by default: its quotes are the ones that
+    # tend to be gone by the time an order would arrive.
+    paper_lead_venue: str = "P"
     latency_probe_s: float = 15.0
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0

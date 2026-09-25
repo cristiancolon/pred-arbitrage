@@ -81,5 +81,5 @@ def make_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=10.0),
         headers={"User-Agent": "arbscan/0.1 (read-only scanner)"},
-        limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
     )

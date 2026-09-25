@@ -140,6 +140,8 @@ class _DepthJob:
 
 
 class Scanner:
+    mode = "poll"
+
     def __init__(self, cfg: Config, db: sqlite3.Connection, kalshi: Kalshi, pm: PolymarketUS):
         self.cfg = cfg
         self.db = db
@@ -163,6 +165,7 @@ class Scanner:
         self.last_error: dict | None = None
         self.pair_state: dict[str, dict] = {}
         self.listeners: list[Callable[[], None]] = []
+        self._depth_budget = MAX_DEPTH_FETCHES_PER_SWEEP
 
     def _warn_once(self, key: str, msg: str, *args) -> None:
         if key not in self.warned:
@@ -211,6 +214,25 @@ class Scanner:
         st = self.pair_state.setdefault(pair.id, {})
         st.update(status=status, ts=ts, relation=pair.relation, **fields)
 
+    def _chunks(self, pairs: list[Pair]) -> list[list[Pair]]:
+        """Groups of pairs needing at most one request per venue each. Pairs that share
+        a Polymarket market (a game's "same" and "inverse" pairs) stay together."""
+        out: list[list[Pair]] = []
+        cur: list[Pair] = []
+        tickers: set[str] = set()
+        slugs: set[str] = set()
+        for p in sorted(pairs, key=lambda p: (p.pm, p.kalshi)):
+            if cur and ((p.kalshi not in tickers and len(tickers) >= Kalshi.ORDERBOOK_BATCH)
+                        or (p.pm not in slugs and len(slugs) >= PolymarketUS.SLUG_BATCH)):
+                out.append(cur)
+                cur, tickers, slugs = [], set(), set()
+            cur.append(p)
+            tickers.add(p.kalshi)
+            slugs.add(p.pm)
+        if cur:
+            out.append(cur)
+        return out
+
     async def sweep(self) -> None:
         t0 = time.monotonic()
         errors_before = self.kalshi.api.errors + self.pm.api.errors
@@ -231,7 +253,19 @@ class Scanner:
         if stale or new:
             await self.refresh_kalshi_meta(tickers if stale else new)
 
-        live = [t for t in tickers if self.kmeta[t].status == "active"]
+        # Each chunk fetches both venues at once and is priced as soon as both answer,
+        # so the two sides of a pair are never more than a request apart in time.
+        self._depth_budget = MAX_DEPTH_FETCHES_PER_SWEEP
+        outs = await asyncio.gather(*(self._sweep_chunk(c) for c in self._chunks(pairs)))
+        best = max((o[0] for o in outs if o[0] is not None), key=lambda b: b[0], default=None)
+        newly_finished = sum(o[1] for o in outs)
+        if newly_finished:
+            log.info("%d pairs finished (a market closed); no longer polling them. "
+                     "They can be deleted from %s.", newly_finished, self.cfg.pairs_path)
+        self._finish_sweep(time.time(), t0, len(pairs), sum(o[2] for o in outs), errors_before, best)
+
+    async def _sweep_chunk(self, pairs: list[Pair]) -> tuple[tuple[float, str, str] | None, int, int]:
+        live = sorted({p.kalshi for p in pairs if self.kmeta[p.kalshi].status == "active"})
         kbooks, pms = await asyncio.gather(
             self.kalshi.orderbooks(live), self.pm.markets(sorted({p.pm for p in pairs}))
         )
@@ -283,7 +317,8 @@ class Scanner:
 
         # Depth: least-recently-fetched slugs first so persistent gaps can't starve others.
         slugs = sorted({j.pair.pm for j in jobs}, key=lambda s: self.last_depth.get(s, 0.0))
-        slugs = slugs[:MAX_DEPTH_FETCHES_PER_SWEEP]
+        slugs = slugs[: max(0, self._depth_budget)]
+        self._depth_budget -= len(slugs)
         results = await asyncio.gather(*(self.pm.book(s) for s in slugs), return_exceptions=True)
         books = {}
         for s, r in zip(slugs, results):
@@ -293,6 +328,7 @@ class Scanner:
             books[s] = pmus_ladders(r)
             self.last_depth[s] = time.monotonic()
 
+        ts = time.time()
         for j in jobs:
             if j.pair.pm not in books:
                 continue  # not fetched this sweep; keep any open episode as-is
@@ -307,11 +343,7 @@ class Scanner:
                      j.days, json.dumps(top_n(j.k_ladder, n)), json.dumps(top_n(p_ladder, n))),
                 )
             self.episodes.observe((j.pair.id, j.label), ts, res, j.days)
-
-        if newly_finished:
-            log.info("%d pairs finished (a market closed); no longer polling them. "
-                     "They can be deleted from %s.", newly_finished, self.cfg.pairs_path)
-        self._finish_sweep(ts, t0, len(pairs), len(slugs), errors_before, best)
+        return best, newly_finished, len(slugs)
 
     def _finish_sweep(self, ts: float, t0: float, n_pairs: int, depth: int, errors_before: int,
                       best: tuple[float, str, str] | None, record: bool = True) -> None:
@@ -333,15 +365,27 @@ class Scanner:
                 log.exception("sweep listener failed")
 
 
-def make_scanner(cfg: Config, db: sqlite3.Connection, client) -> Scanner:
-    return Scanner(
-        cfg, db,
-        Kalshi(Api(client, cfg.kalshi_base, cfg.kalshi_rps, "kalshi")),
-        PolymarketUS(Api(client, cfg.pmus_base, cfg.pmus_rps, "pmus")),
-    )
+def make_scanner(cfg: Config, db: sqlite3.Connection, client, stream: bool | None = None) -> Scanner:
+    """The streaming scanner when both venues' API keys are configured, else polling."""
+    kalshi = Kalshi(Api(client, cfg.kalshi_base, cfg.kalshi_rps, "kalshi"))
+    pm = PolymarketUS(Api(client, cfg.pmus_base, cfg.pmus_rps, "pmus"))
+    if cfg.can_stream if stream is None else stream:
+        from .auth import KalshiSigner, PMSigner
+        from .feeds import KalshiFeed, PMFeed
+        from .live import LiveScanner
+
+        noop = lambda *_: None  # noqa: E731 (LiveScanner installs the real callbacks)
+        kfeed = KalshiFeed(cfg.kalshi_ws_url, KalshiSigner.from_file(cfg.kalshi_key_id, cfg.kalshi_private_key_path),
+                           noop, noop)
+        pfeed = PMFeed(cfg.pmus_ws_url, PMSigner(cfg.pmus_key_id, cfg.pmus_secret_key), noop)
+        return LiveScanner(cfg, db, kalshi, pm, kfeed, pfeed)
+    return Scanner(cfg, db, kalshi, pm)
 
 
 async def run_loop(scanner: Scanner, stop: asyncio.Event, once: bool = False) -> None:
+    if hasattr(scanner, "run_forever") and not once:
+        await scanner.run_forever(stop)
+        return
     cfg = scanner.cfg
     log.info("scanner started; polling every %.1fs", cfg.poll_interval_s)
     try:
@@ -374,4 +418,4 @@ async def run(cfg: Config, db: sqlite3.Connection, once: bool = False) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     async with make_client() as client:
-        await run_loop(make_scanner(cfg, db, client), stop, once)
+        await run_loop(make_scanner(cfg, db, client, stream=False if once else None), stop, once)

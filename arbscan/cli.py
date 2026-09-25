@@ -8,6 +8,15 @@ import sys
 from . import catalog, config, jev, match, report, review, scanner, store
 
 
+def _run(coro):
+    """Run on uvloop when it's installed: a faster event loop for the feeds."""
+    try:
+        import uvloop
+    except ImportError:
+        return asyncio.run(coro)
+    return uvloop.run(coro)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="arbscan", description="Read-only Kalshi <-> Polymarket US arbitrage scanner.")
     ap.add_argument("-c", "--config", help="TOML config file (default: ./config.toml if present)")
@@ -57,14 +66,14 @@ def main(argv: list[str] | None = None) -> None:
         elif args.cmd == "autoreview":
             asyncio.run(jev.review(cfg, db, limit=args.limit, dry_run=args.dry_run))
         elif args.cmd == "scan":
-            asyncio.run(scanner.run(cfg, db, once=args.once))
+            _run(scanner.run(cfg, db, once=args.once))
         elif args.cmd == "serve":
             from dataclasses import replace
 
             from .service import serve  # imports the web stack only when needed
 
             cfg = replace(cfg, web_host=args.host or cfg.web_host, web_port=args.port or cfg.web_port)
-            asyncio.run(serve(cfg, args.config, db, run_scanner=not args.no_scanner))
+            _run(serve(cfg, args.config, db, run_scanner=not args.no_scanner))
         elif args.cmd == "report":
             report.run(db, args.hours, args.min_profit, args.top)
     except KeyboardInterrupt:

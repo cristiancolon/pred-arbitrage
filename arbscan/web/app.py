@@ -123,7 +123,8 @@ class Service:
             "now": time.time(),
             "scanner": {
                 "started": sc.started, "sweeps": sc.sweep_count, "last": sc.last_sweep, "last_error": sc.last_error,
-                "poll_interval_s": self.cfg.poll_interval_s,
+                "poll_interval_s": self.cfg.poll_interval_s, "mode": sc.mode,
+                "feeds": sc.feed_state() if hasattr(sc, "feed_state") else None,
                 "pairs": {"total": len(sc.pairs.pairs), "live": statuses.count("live"),
                           "paused": statuses.count("paused"), "finished": len(sc.finished)},
             },

@@ -34,6 +34,8 @@ export function Pipeline() {
   const sc = s.scanner;
   const last = sc.last;
   const fresh = last && now - last.ts < Math.max(15, sc.poll_interval_s * 4);
+  const streaming = sc.mode === "stream";
+  const feedsUp = streaming && Object.values(sc.feeds || {}).every((f) => f.connected);
   const refresh = async () => {
     const r = await api("/api/jobs/refresh", { method: "POST" });
     toast(r.started ? `Refresh started: ${(job?.stages || ["catalog", "match"]).join(", then ")}` : "A refresh is already running");
@@ -69,6 +71,9 @@ export function Pipeline() {
       value=${html`${int(sc.pairs.live)}<span class="muted" style="font-size:15px;font-weight:500"> / ${int(sc.pairs.total)}</span>`}
       sub=${`pairs live${sc.pairs.finished ? ` · ${sc.pairs.finished} finished` : ""}${sc.pairs.paused ? ` · ${sc.pairs.paused} paused` : ""}`}
       foot=${sc.pairs.total === 0 ? html`<${Status}>Idle until pairs are approved<//>`
+        : streaming && fresh ? html`<${Status} tone=${feedsUp ? "good" : "warning"} pulse=${feedsUp}>${feedsUp
+            ? `Streaming · ${last.dur_ms != null ? `${last.dur_ms} ms behind the exchanges` : "waiting for updates"}`
+            : `Reconnecting: ${Object.entries(sc.feeds || {}).filter(([, f]) => !f.connected).map(([n]) => (n === "pmus" ? "Polymarket" : "Kalshi")).join(", ")}`}<//>`
         : fresh ? html`<${Status} tone="good" pulse>Sweeping every ${sc.poll_interval_s}s · ${(last.dur_ms / 1000).toFixed(1)}s each<//>`
         : html`<${Status} tone="warning">Last sweep ${ago(last?.ts, now)}<//>`} />
     <${Stage} icon="chart" name="Report" active=${openNow > 0}
@@ -127,8 +132,12 @@ export function Overview() {
         foot=${k.median_duration != null ? `median ${duration(k.median_duration)} open` : "none in this range"} />
       <${Tile} label="Best-case profit" value=${money(k.profit)}
         foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />
-      <${Tile} label="Sweep time" value=${k.avg_sweep_ms != null ? `${(k.avg_sweep_ms / 1000).toFixed(2)}s` : "—"}
-        foot=${html`<span>${int(k.sweeps)} sweeps${k.errors ? ` · ${k.errors} API errors` : ""}</span><${Sparkline} values=${(data?.latency || []).slice(-40).map((p) => p[1])} />`} />
+      ${s?.scanner?.mode === "stream"
+        ? html`<${Tile} label="Latency" value=${k.avg_sweep_ms != null ? `${Math.round(k.avg_sweep_ms)} ms` : "—"}
+            title="Median time from the exchange's timestamp on a book update to the edge being computed here"
+            foot=${html`<span>exchange → edge computed${k.errors ? ` · ${k.errors} reconnects` : ""}</span><${Sparkline} values=${(data?.latency || []).slice(-40).map((p) => p[1])} />`} />`
+        : html`<${Tile} label="Sweep time" value=${k.avg_sweep_ms != null ? `${(k.avg_sweep_ms / 1000).toFixed(2)}s` : "—"}
+            foot=${html`<span>${int(k.sweeps)} sweeps${k.errors ? ` · ${k.errors} API errors` : ""}</span><${Sparkline} values=${(data?.latency || []).slice(-40).map((p) => p[1])} />`} />`}
     </div>
 
     <${ChartCard} title="How close the market got to an arb"

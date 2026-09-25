@@ -172,7 +172,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     payout_k REAL,
     payout_p REAL,
     pnl REAL,
-    note TEXT
+    note TEXT,
+    books TEXT                      -- JSON: the ask ladders (top 5) seen when deciding and met on arrival, per leg
 );
 CREATE INDEX IF NOT EXISTS paper_ts ON paper_trades (ts);
 CREATE INDEX IF NOT EXISTS paper_status ON paper_trades (status);
@@ -230,6 +231,7 @@ MIGRATIONS = {
     "decisions": [("source", "TEXT")],
     "episodes": [("cost_at_max", "REAL"), ("cut", "INTEGER")],
     "sweeps": [("best_edge", "REAL"), ("best_pair", "TEXT"), ("best_dir", "TEXT")],
+    "paper_trades": [("books", "TEXT")],
 }
 
 

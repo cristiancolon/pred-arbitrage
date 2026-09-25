@@ -40,6 +40,7 @@ from .latency import LatencyModel
 log = logging.getLogger(__name__)
 
 SHADOW_S = 120.0
+BOOK_LEVELS = 5  # ask levels saved with each trade, as seen and as met
 SETTLE_GRACE_S = 3600.0  # look for results this long after the expected resolution
 EPS = 1e-9
 VENUES = ("K", "P")
@@ -197,8 +198,10 @@ class PaperTrader:
         return book.yes_asks if side == "yes" else book.no_asks
 
     def _fill(self, venue: str, market: str, side: str, qty: float, limit: float, coef: float,
-              budget: float) -> Fill:
+              budget: float, met: dict | None = None) -> Fill:
         ladder = self._ladder(venue, market, side)
+        if met is not None:
+            met[venue] = [list(lv) for lv in ladder[:BOOK_LEVELS]] if ladder is not None else None
         if ladder is None or qty < 1:
             return Fill()
         levels = take(ladder, qty, limit, coef, budget, self._hidden(venue, market, side))
@@ -245,7 +248,8 @@ class PaperTrader:
         trade = {"id": uuid.uuid4().hex[:16], "ts": now, "pair": pair.id, "direction": label,
                  "k_side": k_side, "p_side": p_side, "planned_size": n, "planned_edge": res.top_edge,
                  "planned_profit": res.profit, "planned_cost": res.cost, "k_limit": k_limit, "p_limit": p_limit,
-                 "days": days, "resolve_ts": now + days * 86400 if days is not None else None}
+                 "days": days, "resolve_ts": now + days * 86400 if days is not None else None,
+                 "_seen": {"K": [list(lv) for lv in kv[:BOOK_LEVELS]], "P": [list(lv) for lv in pv[:BOOK_LEVELS]]}}
         task = asyncio.get_running_loop().create_task(
             self._execute(trade, pair.kalshi, pair.pm, k_coef, p_coef, reserve, max(0.0, now - seen_ts)))
         self.tasks.add(task)
@@ -269,9 +273,11 @@ class PaperTrader:
             d = {v: self.latency.delay(v, decide_s) for v in VENUES}
             t["k_delay_ms"], t["p_delay_ms"] = 1000 * d["K"].look, 1000 * d["P"].look
 
+            met: dict = {}
+
             async def leg(v: str, limit: float) -> Fill:
                 await self._at(t0 + d[v].look)
-                return self._fill(v, mk[v], side[v], t["planned_size"], limit, coef[v], reserve[v])
+                return self._fill(v, mk[v], side[v], t["planned_size"], limit, coef[v], reserve[v], met)
 
             fills = dict(zip(VENUES, await asyncio.gather(leg("K", t["k_limit"]), leg("P", t["p_limit"]))))
             await self._at(t0 + max(d["K"].reply, d["P"].reply))  # both fill reports are back
@@ -319,6 +325,7 @@ class PaperTrader:
                     t.update(unwind_venue=long_v, unwind_qty=uw.qty,
                              unwind_loss=uw.qty * unit_long + uw.spent - uw.qty)
 
+            t["books"] = json.dumps({"seen": t.pop("_seen"), "met": met}, separators=(",", ":"))
             t.update(k_qty=qty["K"], p_qty=qty["P"], k_fees=fees["K"], p_fees=fees["P"], k_hold=hold["K"],
                      p_hold=hold["P"], k_out=out["K"], p_out=out["P"],
                      locked_profit=min(hold["K"], hold["P"]) - out["K"] - out["P"])
@@ -349,7 +356,7 @@ class PaperTrader:
     COLS = ("id", "ts", "pair", "direction", "k_side", "p_side", "planned_size", "planned_edge", "planned_profit",
             "planned_cost", "k_limit", "p_limit", "k_delay_ms", "p_delay_ms", "k_qty", "p_qty", "k_fees", "p_fees",
             "unwind_venue", "unwind_qty", "unwind_loss", "k_hold", "p_hold", "k_out", "p_out", "locked_profit",
-            "days", "resolve_ts", "status", "settled_ts", "payout_k", "payout_p", "pnl", "note")
+            "days", "resolve_ts", "status", "settled_ts", "payout_k", "payout_p", "pnl", "note", "books")
 
     def _write(self, t: dict) -> None:
         self.out.execute(f"INSERT OR REPLACE INTO paper_trades ({', '.join(self.COLS)}) "

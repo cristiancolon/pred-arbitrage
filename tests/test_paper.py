@@ -138,6 +138,8 @@ def test_liquidity_gone_by_arrival_is_chased_then_unwound(tmp_path):
     assert t["unwind_loss"] == pytest.approx(70 * (0.45 + entry_fee + 0.60 - 1) + order_fee("K", 0.07, [(0.60, 70)]))
     assert t["status"] == "open"
     assert t["locked_profit"] < t["planned_profit"]
+    books = json.loads(t["books"])  # what it saw when deciding, and what each order met on arrival
+    assert books["seen"]["P"][0] == [0.5, 100.0] and books["met"]["P"][0] == [0.5, 30.0]
 
 
 def test_nothing_filled_is_a_miss_and_frees_the_cash(tmp_path):

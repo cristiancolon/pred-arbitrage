@@ -10,8 +10,9 @@ resolving soon enough, and returning enough per year.
 
 Summing every window's profit assumes a fresh bankroll for each one. ``simulate``
 instead spends one pool of cash: whenever cash is free it funds the best-ranked
-picks open at that moment, scaling the last one down to the cash left, and keeps
-each stake tied up until its market resolves (then returns stake plus profit).
+picks open at that moment, each up to its stake cap (``PickRules.stake_fraction``)
+and the cash left, and keeps each stake tied up until its market resolves (then
+returns stake plus profit).
 It's still a best case: each window counts at its peak, both legs fill at the
 quoted prices, and nothing settles against you.
 """
@@ -53,11 +54,21 @@ class PickRules:
     min_annualized: float = 1.0
     max_edge: float | None = 0.05
     max_days: float | None = 7.0
+    # Sizing: one pick may use at most this share of the money (on each venue, when
+    # paper trading) if it resolves within a day, and proportionally less the longer
+    # it ties the money up, so a multi-day pick can't starve the quick ones. None: no cap.
+    max_stake: float | None = 0.5
 
     @classmethod
     def from_config(cls, cfg) -> "PickRules":
         return cls(cfg.pick_min_window_s, cfg.pick_min_annualized_return, cfg.pick_max_edge or None,
-                   cfg.pick_max_days or None)
+                   cfg.pick_max_days or None, cfg.pick_max_stake or None)
+
+    def stake_fraction(self, days: float | None) -> float:
+        if self.max_stake is None:
+            return 1.0
+        d = UNKNOWN_RESOLUTION_DAYS if days is None else max(days, MIN_LOCK_DAYS)
+        return self.max_stake * min(1.0, 1.0 / d)
 
     def reason(self, edge: float | None, open_s: float, days: float | None, rate: float | None) -> str | None:
         """Why a window isn't a pick, or None if it is."""
@@ -77,7 +88,7 @@ class PickRules:
 
     def describe(self) -> dict:
         return {"min_window_s": self.min_window_s, "min_annualized": self.min_annualized,
-                "max_edge": self.max_edge, "max_days": self.max_days}
+                "max_edge": self.max_edge, "max_days": self.max_days, "max_stake": self.max_stake}
 
 
 def simulate(windows, bankroll: float, rules: PickRules, now: float | None = None) -> dict:
@@ -115,7 +126,9 @@ def simulate(windows, bankroll: float, rules: PickRules, now: float | None = Non
         open_.sort(key=lambda w: (window_rate(w), w["max_profit"]), reverse=True)
         while open_ and cash >= 1.0:
             w = open_.pop(0)
-            frac = min(1.0, cash / w["cost_at_max"])
+            capital = cash + sum(stake for _, stake, _ in tied)
+            cap = rules.stake_fraction(w.get("days_to_resolve")) * capital
+            frac = min(1.0, cash / w["cost_at_max"], cap / w["cost_at_max"])
             cash -= w["cost_at_max"] * frac
             profit += w["max_profit"] * frac
             taken += 1

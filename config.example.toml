@@ -39,6 +39,7 @@ pick_min_window_s = 1.0            # open at least this long (seconds)
 pick_max_days = 7.0                # resolves within this many days (0 = no limit)
 pick_min_annualized_return = 1.0   # returns at least this per year (1.0 = 100%)
 pick_max_edge = 0.05               # bigger edges are usually a rules mismatch or a stale quote (0 = no limit)
+pick_max_stake = 0.5               # one pick uses at most this share of a venue's money, less the longer it locks it up (0 = no cap)
 
 # Paper trading (needs the streaming keys above): act on every pick as a bot on this
 # machine would, with real fees and measured order latency, but never place an order.

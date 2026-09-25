@@ -2,7 +2,7 @@ import pytest
 
 from arbscan.bankroll import PickRules, simulate, window_rate
 
-LOOSE = PickRules(min_window_s=1, min_annualized=0.10, max_edge=None, max_days=None)
+LOOSE = PickRules(min_window_s=1, min_annualized=0.10, max_edge=None, max_days=None, max_stake=None)
 
 
 def w(start, cost, profit, days, open_s=10, edge=0.02):
@@ -46,7 +46,7 @@ def test_pick_rules():
 
 
 def test_no_cash_left():
-    r = simulate([w(0, 500, 5, days=60), w(10, 100, 50, days=0.01)], 500, PickRules(min_annualized=0, max_days=None))
+    r = simulate([w(0, 500, 5, days=60), w(10, 100, 50, days=0.01)], 500, PickRules(min_annualized=0, max_days=None, max_stake=None))
     assert r["taken"] == 1 and r["skipped"] == {"no cash": 1}
 
 
@@ -54,3 +54,14 @@ def test_suspicious_edges_are_skipped():
     rules = PickRules(min_window_s=1, min_annualized=0.1, max_edge=0.05, max_days=None)
     r = simulate([w(0, 300, 120, days=0.01, edge=0.40), w(10, 100, 3, days=0.01)], 500, rules)
     assert r["taken"] == 1 and r["profit"] == pytest.approx(3) and r["skipped"] == {"suspicious edge": 1}
+
+
+def test_stake_cap_shrinks_with_lock_up():
+    rules = PickRules(max_stake=0.5)
+    assert rules.stake_fraction(0.2) == 0.5 and rules.stake_fraction(1) == 0.5
+    assert rules.stake_fraction(2) == pytest.approx(0.25) and rules.stake_fraction(7) == pytest.approx(0.5 / 7)
+    # A 3-day pick gets a sixth of the money, leaving the rest for a same-day one.
+    slow, fast = w(0, 300, 9, days=3), w(100, 300, 3, days=0.2)
+    r = simulate([slow, fast], 300, PickRules(min_annualized=0.1, max_stake=0.5))
+    assert r["taken"] == 2
+    assert r["profit"] == pytest.approx(9 * (50 / 300) + 3 * (150 / 300))  # fast: capped at half of $300

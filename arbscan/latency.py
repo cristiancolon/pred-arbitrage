@@ -107,11 +107,13 @@ class LatencyProbe:
                             "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", "intent": "ORDER_INTENT_BUY_LONG",
                             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}}
 
-    async def _time(self, client: httpx.AsyncClient, venue: str, method: str, url: str, headers: dict,
-                    body: dict | None = None) -> None:
-        t = time.perf_counter()
+    async def _time(self, client: httpx.AsyncClient, venue: str, request) -> None:
+        """Send twice and time the second: the first re-opens the connection if the
+        venue closed it while idle, as a live bot's keep-alive traffic would have."""
         try:
-            r = await client.request(method, url, headers=headers, json=body)
+            await request()
+            t = time.perf_counter()
+            r = await request()
         except httpx.HTTPError as e:
             self.errors += 1
             log.debug("latency probe %s failed: %s", venue, e)
@@ -124,20 +126,20 @@ class LatencyProbe:
 
     async def run(self, stop: asyncio.Event) -> None:
         async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "arbscan/0.1"}) as client:
-            first = True
             while not stop.is_set():
                 slug = self.slug_fn()
-                calls = [self._time(client, "K", "GET", self.kalshi_url, self.ks.headers("GET", self.kalshi_path))]
+
+                def kalshi():
+                    return client.get(self.kalshi_url, headers=self.ks.headers("GET", self.kalshi_path))
+
+                def preview():
+                    return client.post(self.pm_url, headers=self.ps.headers("POST", PM_PREVIEW_PATH),
+                                       json=self.preview_body(slug))
+
+                calls = [self._time(client, "K", kalshi)]
                 if slug:
-                    calls.append(self._time(client, "P", "POST", self.pm_url, self.ps.headers("POST", PM_PREVIEW_PATH),
-                                            self.preview_body(slug)))
+                    calls.append(self._time(client, "P", preview))
                 await asyncio.gather(*calls)
-                if first:  # the first request paid for the TLS handshake; a live bot keeps connections warm
-                    for v in ("K", "P"):
-                        if self.model.rtt[v]:
-                            self.model.rtt[v].pop()
-                    first = False
-                    continue
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=self.every_s)
                 except asyncio.TimeoutError:

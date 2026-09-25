@@ -1,0 +1,22 @@
+# systemd *user* unit: install with deploy/install.sh (see README).
+# Runs the scanner, the scheduled catalog/match refresh, and the dashboard.
+[Unit]
+Description=arbscan: Kalshi / Polymarket US arbitrage scanner + dashboard (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pred-arbitrage
+ExecStart=%h/pred-arbitrage/.venv/bin/arbscan serve
+Restart=always
+RestartSec=15
+# Be a good neighbour to the Pi's other processes. Steady state is ~60-80 MB; a
+# refresh adds a ~200 MB subprocess for a couple of minutes every few hours.
+Nice=10
+MemoryHigh=500M
+MemoryMax=768M
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

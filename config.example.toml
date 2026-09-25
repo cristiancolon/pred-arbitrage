@@ -40,6 +40,13 @@ pick_max_days = 7.0                # resolves within this many days (0 = no limi
 pick_min_annualized_return = 1.0   # returns at least this per year (1.0 = 100%)
 pick_max_edge = 0.05               # bigger edges are usually a rules mismatch or a stale quote (0 = no limit)
 
+# Paper trading (needs the streaming keys above): act on every pick as a bot on this
+# machine would, with real fees and measured order latency, but never place an order.
+# See the Paper trading page and README.
+paper_trading = true
+paper_min_profit_usd = 0.01        # skip picks expected to make less than this
+latency_probe_s = 15.0             # re-measure order round trips this often (read-only requests)
+
 # If you qualify for Polymarket US's volume rebate on taker fees (10/25/50%).
 pmus_taker_rebate = 0.0
 

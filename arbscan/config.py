@@ -61,6 +61,14 @@ class Config:
     pick_max_days: float = 7.0
     pick_min_annualized_return: float = 1.0
     pick_max_edge: float = 0.05
+    # Paper trading (streaming mode): act on picks as a live bot on this machine would,
+    # filling each leg against the live book when its order would have arrived, with
+    # fees and latency, but never placing an order (see arbscan/paper.py). Skips picks
+    # expected to make less than paper_min_profit_usd. Order latency is re-measured
+    # every latency_probe_s with read-only requests (see arbscan/latency.py).
+    paper_trading: bool = True
+    paper_min_profit_usd: float = 0.01
+    latency_probe_s: float = 15.0
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

@@ -162,7 +162,15 @@ class Service:
             "pipeline": self.pipeline,
             "features": {"jev": bool(jev.api_key(self.cfg))},
             "bankroll": self.cfg.bankroll_usd,
+            "paper": self._paper_brief(),
         }
+
+    def _paper_brief(self) -> dict | None:
+        p = getattr(self.scanner, "paper", None)
+        if p is None:
+            return None
+        return {"realized": p.realized, "locked": sum(t["locked_profit"] for t in p.open.values()),
+                "open": len(p.open), "cash": dict(p.cash), "sent": p.stats.get("sent", 0)}
 
     def on_sweep(self) -> None:
         if self.hub.subscribers:
@@ -275,6 +283,13 @@ def create_app(svc: Service) -> Starlette:
         return JSON(await svc.read(queries.opportunities, _float(request, "hours", 24, 0.25, 24 * 90), svc.rules,
                                    request.query_params.get("view") != "all"))
 
+    async def paper(request: Request) -> Response:
+        data = await svc.read(queries.paper, _float(request, "hours", 24, 0.25, 24 * 90))
+        trader = getattr(svc.scanner, "paper", None)
+        data["live"] = trader.snapshot() if trader is not None else None
+        data["rules"] = svc.rules.describe()
+        return JSON(data)
+
     async def jobs(_: Request) -> Response:
         return JSON({"job": svc.job.snapshot(), "log": list(svc.job.log)})
 
@@ -297,6 +312,7 @@ def create_app(svc: Service) -> Starlette:
             Route("/api/pair", pair),
             Route("/api/pairs/remove", remove, methods=["POST"]),
             Route("/api/opportunities", opportunities),
+            Route("/api/paper", paper),
             Route("/api/jobs", jobs),
             Route("/api/jobs/refresh", refresh, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC)),

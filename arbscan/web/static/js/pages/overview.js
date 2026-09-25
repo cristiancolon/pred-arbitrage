@@ -130,8 +130,11 @@ export function Overview() {
     <${Pipeline} />
 
     <div class="kpis">
-      <${Tile} label="Closest to breakeven now" value=${best ? cents(best.edge) : "—"}
-        foot=${best ? html`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(best.k_title || "").split(" | ")[0]}</span>` : "per $1 pair, after both fees"} />
+      ${s?.paper ? html`<a class="tile-link" href="#/paper"><${Tile} label="Paper trading" value=${money(s.paper.realized + s.paper.locked)}
+          title="Settled paper trades at their result plus open ones at the profit they locked in. Simulated with real fees and measured order latency; no orders are placed."
+          foot=${`${int(s.paper.sent)} picks sent · ${int(s.paper.open)} open · ${money(s.paper.cash.K + s.paper.cash.P, 0)} cash`} /></a>`
+        : html`<${Tile} label="Closest to breakeven now" value=${best ? cents(best.edge) : "—"}
+          foot=${best ? html`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(best.k_title || "").split(" | ")[0]}</span>` : "per $1 pair, after both fees"} />`}
       <${Tile} label="Profitable windows" value=${int(k.windows)}
         foot=${k.windows ? `${int(k.picks)} picks · median ${duration(k.median_duration)} open` : "none in this range"} />
       ${data?.sim ? html`<${Tile} label=${`With your ${money(data.sim.bankroll, 0)}`} value=${money(data.sim.profit)}

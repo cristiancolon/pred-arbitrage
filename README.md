@@ -76,6 +76,51 @@ least an hour). On the first 4.6 hours of streaming data, these rules kept 163 o
 ~1,900 usable windows and did at least as well as looser or stricter ones, but that's
 too little data to tune on; revisit them as history builds up.
 
+### Paper trading
+
+With both venues' API keys set, the streaming scanner also **paper trades** every pick
+(`paper_trading = true`; the Paper trading page). It never places an order; it acts
+the way a bot on this machine would, and fills against the live books:
+
+1. **Decide** from the books as seen: size the pair from the cash on each venue
+   (`bankroll_usd` split in two, plus whatever settled trades paid out there), and
+   send both legs at once as immediate-or-cancel limit orders at the worst price the
+   size needs.
+2. **Arrive** after the measured latency. Each leg fills against that venue's book as
+   it stood when the order would have reached the exchange: decision time, plus half
+   a round trip to the venue's order API, plus how far our feed runs behind the
+   exchange (the book we'll have *seen* by then is the one the order meets). Liquidity
+   that others took or pulled in the meantime is gone, and a price that moved past
+   the limit doesn't fill.
+3. **Repair** an unequal fill once both fill reports are back: buy the missing leg at
+   up to break-even; if that doesn't fill, sell the extra contracts back (buy the other
+   side on the same venue, which nets out), taking the loss.
+4. **Settle** when both markets publish results: each venue pays $1 per winning
+   contract into its own cash, so cash drifts between venues the way it would for
+   real, and a pair that wasn't really the same bet shows up as a loss.
+
+Costs included: taker fees per order, rounded up to each venue's balance precision
+(Kalshi $0.0001, Polymarket US whole cents); slippage from walking the book and from
+the book moving before the orders arrive; losses unwinding one-sided fills; and cash
+tied up until resolution. Our own simulated fills hide the liquidity they took for two
+minutes so it can't be taken twice. Not included: deposit and withdrawal costs and
+the days it takes to move cash between venues, and any queue position or rate limits
+on real order entry.
+
+**How the latency is measured without trading.** Every `latency_probe_s` (15 s) the
+scanner times signed, read-only requests on the same host and kept-alive connection an
+order would use: Kalshi's `GET /portfolio/balance`, and Polymarket US's
+`POST /v1/order/preview`, which runs an order through validation and returns it
+without creating it (a 1-contract, 1¢ IOC buy, so even a misrouted request couldn't
+trade). Each simulated order draws one of the recent round trips at random, so jitter
+shows up; the feed delay is the median of the exchanges' own timestamps on recent
+updates. From the Pi in September 2026 that came to roughly: Kalshi 82 ms round trip
++ 45 ms feed ≈ **90 ms** from seeing a change to the order meeting the book, and
+Polymarket US 110 ms + 125 ms ≈ **180 ms**.
+
+`arbscan serve` keeps the paper account in the `paper_trades` table. Changing
+`bankroll_usd` works like a deposit or withdrawal on each venue.
+
 ### What the numbers do *not* include
 
 - **Execution risk.** The two legs can't be filled atomically. By the time you act,
@@ -103,9 +148,11 @@ Nothing needs a button press: new markets flow through to the scanner on their o
   which outcome matches which, its edge history, past windows and both rulebooks
   side by side with numbers, dates and settlement wording highlighted, or to stop
   watching it.
-- **Opportunities.** Every profitable window: how long it lasted, how big the edge
-  got, the capital it needed, and a flag on the ones that look like a rules
-  mismatch.
+- **Opportunities.** Picks by default (or every profitable window): how long it
+  lasted, how big the edge got, the capital it needed, its return per year, and why
+  a window wasn't a pick.
+- **Paper trading.** The simulated account: P&L, cash on each venue, how much of
+  each pick actually filled, the latency used, and every paper trade.
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without
@@ -304,6 +351,7 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `markets` | the catalog, including full rules text |
 | `candidates`, `decisions` | matcher output and review decisions (`source`: human, rule or jev) |
 | `jev_reviews` | Jev's verdict, reason and answers for every pair it has read |
+| `paper_trades` | every simulated trade: what was planned, what filled on each venue, fees, unwinds, and the result |
 | `discovered` | markets live discovery added between refreshes, with how many suggestions each got |
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |

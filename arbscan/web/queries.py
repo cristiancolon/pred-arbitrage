@@ -199,3 +199,35 @@ def opportunities(db: sqlite3.Connection, hours: float, rules: bankroll.PickRule
                    "profit": sum(e["max_profit"] or 0 for e in eps if lo <= (e["max_top_edge"] or 0) < hi)}
                   for lo, hi, lab in EDGE_BUCKETS],
     }
+
+
+def paper(db: sqlite3.Connection, hours: float) -> dict:
+    """Paper trades in the last ``hours`` (newest first) and all-time totals."""
+    since = time.time() - hours * 3600
+    rows = [dict(r) for r in db.execute("SELECT * FROM paper_trades WHERE ts >= ? ORDER BY ts DESC", (since,))]
+    names = titles(db, sorted({r["pair"] for r in rows[:300]}))
+    for r in rows[:300]:
+        for key, value in names.get(r["pair"], {}).items():
+            r.setdefault(key, value)
+    everything = [dict(r) for r in db.execute(
+        "SELECT ts, status, planned_size, planned_profit, k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, "
+        "unwind_loss, locked_profit, pnl FROM paper_trades ORDER BY ts")]
+    traded = [r for r in everything if r["status"] != "missed"]
+    curve, total = [], 0.0
+    for r in traded:  # settled trades at their result, open ones at the profit they locked in
+        total += r["pnl"] if r["status"] == "settled" else (r["locked_profit"] or 0.0)
+        curve.append([r["ts"], total])
+    planned = sum(r["planned_size"] or 0 for r in everything)
+    filled = sum(min(r["k_qty"] or 0, r["p_qty"] or 0) for r in everything)
+    return {
+        "hours": hours, "since": since, "trades": rows[:300], "total": len(rows), "curve": curve,
+        "totals": {
+            "sent": len(everything), "missed": len(everything) - len(traded),
+            "unwound": sum(1 for r in traded if (r["unwind_loss"] or 0) > 0),
+            "fill_rate": filled / planned if planned else None,
+            "planned_profit": sum(r["planned_profit"] or 0 for r in traded),
+            "fees": sum((r["k_fees"] or 0) + (r["p_fees"] or 0) for r in traded),
+            "unwind_loss": sum(r["unwind_loss"] or 0 for r in traded),
+            "pnl": total,
+        },
+    }

@@ -67,6 +67,11 @@ resolves; anything resolving within 6 hours counts as 6 hours), and a window is 
   meant a rules mismatch or a stale quote), and
 - stayed open at least `pick_min_window_s` (1 s).
 
+One pick may use at most `pick_max_stake` (half) of the money on a venue if it
+resolves within a day, and proportionally less the longer it ties the money up (a
+quarter at 2 days, 1/14 at 7 days), so a multi-day pick can't starve the quick ones.
+Both the simulation below and paper trading size picks this way.
+
 The Overview lists the best picks open right now, and the Opportunities page shows
 picks by default (switch to "All windows" to see the rest and why each was left out).
 Summing windows would assume a fresh bankroll for each one, so the Overview also

@@ -61,6 +61,10 @@ class Config:
     pick_max_days: float = 7.0
     pick_min_annualized_return: float = 1.0
     pick_max_edge: float = 0.05
+    # One pick may use at most this share of the money on a venue if it resolves within
+    # a day, and proportionally less the longer it ties the money up (a quarter of it at
+    # 2 days), so a multi-day pick can't starve the quick ones.
+    pick_max_stake: float = 0.5
     # Paper trading (streaming mode): act on picks as a live bot on this machine would,
     # filling each leg against the live book when its order would have arrived, with
     # fees and latency, but never placing an order (see arbscan/paper.py). Skips picks

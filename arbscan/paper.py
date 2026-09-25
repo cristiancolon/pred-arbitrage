@@ -118,6 +118,7 @@ class PaperTrader:
         self.kbooks, self.pbooks, self.kmeta = kbooks, pbooks, kmeta
         self.rules = bankroll.PickRules.from_config(cfg)
         self.cash = {"K": 0.0, "P": 0.0}
+        self.tied = {"K": 0.0, "P": 0.0}  # spent on positions not yet settled
         self.reserved = {"K": 0.0, "P": 0.0}
         self.deposits = {"K": 0.0, "P": 0.0}
         self.open: dict[str, dict] = {}  # trade id -> row, positions awaiting settlement
@@ -144,6 +145,8 @@ class PaperTrader:
                 self.cash[v] += r[f"payout_{v.lower()}"] or 0.0
             if r["status"] == "open":
                 self.open[r["id"]] = r
+                for v in VENUES:
+                    self.tied[v] += r[f"{v.lower()}_out"] or 0.0
             elif r["status"] == "settled":
                 self.realized += r["pnl"] or 0.0
         if row is None or self.deposits != want:
@@ -210,7 +213,10 @@ class PaperTrader:
         key = (pair.id, label)
         if pair.id in self.busy or self.traded.get(key) == window:
             return
-        budget = {v: self.available(v) for v in VENUES}
+        # Each venue's money is cash plus what's tied up in open positions; one pick gets
+        # at most its stake cap of that, less the longer it locks the money up.
+        cap = self.rules.stake_fraction(days)
+        budget = {v: min(self.available(v), cap * (self.cash[v] + self.tied[v])) for v in VENUES}
         if min(budget.values()) < 1.0:
             self.stats["no cash"] += 1
             self.traded[key] = window
@@ -323,6 +329,8 @@ class PaperTrader:
                 if abs(hold["K"] - hold["P"]) >= 1:
                     t["note"] = f"{abs(hold['K'] - hold['P']):g} contracts unhedged"
                 self.open[t["id"]] = t
+                for v in VENUES:
+                    self.tied[v] += out[v]
             self.stats[t["status"] if t["status"] != "settled" else "unwound"] += 1
             self._write(t)
             log.info("paper %s %s %s: planned %d for $%.2f, got K %g / P %g, locked $%.2f (K %.0f ms, P %.0f ms)",
@@ -366,6 +374,8 @@ class PaperTrader:
             pay_p = t["p_hold"] * (yp if t["p_side"] == "yes" else 1 - yp)
             self.cash["K"] += pay_k
             self.cash["P"] += pay_p
+            self.tied["K"] -= t["k_out"]
+            self.tied["P"] -= t["p_out"]
             t.update(status="settled", settled_ts=now, payout_k=pay_k, payout_p=pay_p,
                      pnl=pay_k + pay_p - t["k_out"] - t["p_out"])
             self.realized += t["pnl"]
@@ -376,7 +386,7 @@ class PaperTrader:
         return n
 
     def snapshot(self) -> dict:
-        tied = {v: sum(t[f"{v.lower()}_out"] for t in self.open.values()) for v in VENUES}
+        tied = dict(self.tied)
         locked = sum(t["locked_profit"] for t in self.open.values())
         return {"deposits": self.deposits, "cash": dict(self.cash), "reserved": dict(self.reserved), "tied": tied,
                 "open": len(self.open), "locked": locked, "realized": self.realized, "in_flight": len(self.busy),

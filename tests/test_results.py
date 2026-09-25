@@ -56,6 +56,8 @@ def test_what_to_look_up_when(tmp_path):
     ])
     due = results.due(db, tracked, {("P", "p-2")}, NOW)  # the scanner saw p-2 finish
     assert set(due) == {("P", "p-1"), ("P", "p-2"), ("K", "K-9"), ("P", "p-9")}
+    # A day later, K-1's result is read once more in case Kalshi corrected it.
+    assert ("K", "K-1") in results.due(db, tracked, set(), NOW + 86400)
 
 
 def test_recorder_and_backtest_views(tmp_path):

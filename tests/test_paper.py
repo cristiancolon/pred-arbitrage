@@ -126,7 +126,9 @@ def test_liquidity_gone_by_arrival_is_chased_then_unwound(tmp_path):
         await asyncio.sleep(0.06)  # Kalshi filled (~40 ms); Polymarket's order is still on its way (~80 ms)
         h.pbooks["p-1"].update({"bids": [{"px": {"value": "0.50"}, "qty": "30"}, {"px": {"value": "0.30"},
                                 "qty": "500"}], "state": "MARKET_STATE_OPEN"}, time.time())
+        h.trader.reserved["K"] += 1000  # no free cash on Kalshi: selling back what we hold needs none
         await asyncio.gather(*h.trader.tasks)
+        h.trader.reserved["K"] -= 1000
 
     asyncio.run(run())
     t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())

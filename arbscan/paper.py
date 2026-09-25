@@ -73,7 +73,8 @@ def take(ladder, qty: float, limit: float, coef: float, budget: float, hidden: d
             break
         avail = q - (hidden or {}).get(p, 0.0)
         unit = p + per_contract(coef, p)
-        n = min(math.floor(avail + EPS), left, math.floor((budget - spend) / unit + EPS))
+        room = (budget - spend) / unit
+        n = min(math.floor(avail + EPS), left, math.floor(room + EPS) if math.isfinite(room) else left)
         if n <= 0:
             if avail >= 1 and left > 0:
                 break  # out of cash
@@ -316,8 +317,8 @@ class PaperTrader:
                     # out, returning $1 per contract pair.
                     dl = self.latency.delay(long_v)
                     await self._at(time.monotonic() + dl.look)
-                    uw = self._fill(long_v, mk[long_v], _opposite(side[long_v]), x, 0.99, coef[long_v],
-                                    self.available(long_v))
+                    # Selling what we hold needs no cash, so no budget limit here.
+                    uw = self._fill(long_v, mk[long_v], _opposite(side[long_v]), x, 0.99, coef[long_v], math.inf)
                     self.cash[long_v] += uw.qty - uw.spent
                     out[long_v] += uw.spent - uw.qty
                     fees[long_v] += uw.fees

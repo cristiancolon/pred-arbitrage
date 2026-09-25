@@ -350,7 +350,11 @@ class LiveScanner(Scanner):
                     log.exception("scanner housekeeping failed")
                     self.last_error = {"ts": time.time(), "message": f"{type(e).__name__}: {e}"}
         finally:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Save open windows first, so nothing below can keep them from being written.
+            n = len(self.episodes.open)
             self.episodes.close_all()
+            self.out.flush()
+            log.info("saved %d open windows as cut short by the stop", n)
+            await asyncio.gather(*tasks, return_exceptions=True)
             self.out.close()
             log.info("streaming scanner stopped")

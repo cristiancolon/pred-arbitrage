@@ -55,8 +55,9 @@ capital and profit are what $250 on each side could buy at that moment. Summing
 windows would still assume a fresh bankroll for each one, so the Overview also
 **simulates one bankroll**: windows are taken in the order they appeared, each stake
 stays tied up until its market resolves, and windows are skipped when they closed
-within `sim_min_window_s` (1 s) or return less than `sim_min_annualized_return` (10%
-a year). Changing the bankroll re-sizes the recorded history at the next start, from
+within `sim_min_window_s` (1 s), return less than `sim_min_annualized_return` (10%
+a year), or show an edge over `sim_max_edge` (5¢ per $1 pair, which in practice has
+meant a rules mismatch or a stale quote, e.g. a suspended in-game market). Changing the bankroll re-sizes the recorded history at the next start, from
 the order books stored with each observation (`arbscan rescale` does it by hand).
 
 ### What the numbers do *not* include

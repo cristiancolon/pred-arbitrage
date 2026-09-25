@@ -3,9 +3,9 @@ import pytest
 from arbscan.bankroll import simulate
 
 
-def w(start, cost, profit, days, open_s=10):
+def w(start, cost, profit, days, open_s=10, edge=0.02):
     return {"start_ts": start, "end_ts": start + open_s, "cost_at_max": cost, "max_profit": profit,
-            "days_to_resolve": days}
+            "days_to_resolve": days, "max_top_edge": edge}
 
 
 def test_cash_is_tied_up_until_resolution():
@@ -26,3 +26,8 @@ def test_cash_is_tied_up_until_resolution():
 def test_no_cash_left():
     r = simulate([w(0, 500, 5, days=60), w(10, 100, 50, days=0.01)], 500, 1, 0)
     assert r["taken"] == 1 and r["skipped"] == {"no cash": 1}
+
+
+def test_suspicious_edges_are_skipped():
+    r = simulate([w(0, 300, 120, days=0.01, edge=0.40), w(10, 100, 3, days=0.01)], 500, 1, 0.1, max_edge=0.05)
+    assert r["taken"] == 1 and r["profit"] == pytest.approx(3) and r["skipped"] == {"suspicious edge": 1}

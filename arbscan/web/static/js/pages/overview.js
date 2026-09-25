@@ -134,7 +134,7 @@ export function Overview() {
       <${Tile} label="Profitable windows" value=${int(k.windows)}
         foot=${k.median_duration != null ? `median ${duration(k.median_duration)} open` : "none in this range"} />
       ${data?.sim ? html`<${Tile} label=${`With your ${money(data.sim.bankroll, 0)}`} value=${money(data.sim.profit)}
-          title=${`Simulated best case for one bankroll: windows taken in the order they appeared, skipping any open under ${data.sim.min_window_s} s or returning under ${Math.round(data.sim.min_annualized * 100)}% a year; each stake stays tied up until its market resolves. Assumes both legs fill at the quoted prices.`}
+          title=${`Simulated best case for one bankroll: windows taken in the order they appeared, skipping any open under ${data.sim.min_window_s} s, returning under ${Math.round(data.sim.min_annualized * 100)}% a year, or with an edge over ${Math.round((data.sim.max_edge || 1) * 100)}¢ (usually a rules mismatch or stale quote); each stake stays tied up until its market resolves. Assumes both legs fill at the quoted prices.`}
           foot=${`${int(data.sim.taken)} windows taken · ${money(data.sim.tied_up, 0)} still tied up`} />`
         : html`<${Tile} label="Best-case profit" value=${money(k.profit)}
           foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />`}

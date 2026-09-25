@@ -126,7 +126,7 @@ def overview(db: sqlite3.Connection, hours: float, sim: dict | None = None) -> d
     simulated = None
     if sim and sim.get("bankroll"):
         simulated = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"],
-                                      sim["min_annualized"])
+                                      sim["min_annualized"], sim.get("max_edge"))
     return {
         "hours": hours, "since": since, "bucket_s": b, "profit_bucket_s": pb, "sim": simulated,
         "edge": edge, "latency": latency,

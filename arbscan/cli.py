@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.cmd == "report":
             report.run(db, args.hours, args.min_profit, args.top,
                        {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
-                        "min_annualized": cfg.sim_min_annualized_return})
+                        "min_annualized": cfg.sim_min_annualized_return, "max_edge": cfg.sim_max_edge})
     except KeyboardInterrupt:
         pass
     finally:

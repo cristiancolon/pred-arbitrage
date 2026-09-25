@@ -35,6 +35,7 @@ min_edge = 0.0
 bankroll_usd = 500.0
 sim_min_window_s = 1.0
 sim_min_annualized_return = 0.10
+sim_max_edge = 0.05             # bigger edges are usually a rules mismatch or a stale quote
 
 # If you qualify for Polymarket US's volume rebate on taker fees (10/25/50%).
 pmus_taker_rebate = 0.0

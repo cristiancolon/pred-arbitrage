@@ -68,6 +68,9 @@ def test_opportunities_keep_episode_times(env):
     assert ep["start_ts"] == pytest.approx(NOW - 100)
     assert ep["k_title"] == "A vs B | A wins"
     assert [d["count"] for d in data["durations"]][1] == 1  # 9s -> "5-15s"
+    # 1% resolving within a day is a pick: ~370% a year.
+    assert data["counts"] == {"all": 1, "picks": 1} and ep["why"] is None and ep["rate"] == pytest.approx(3.7, rel=0.01)
+    assert client.get("/api/opportunities?hours=1&view=all").json()["total"] == 1
 
 
 def test_pairs_are_filtered_sorted_and_paged_on_the_server(env):
@@ -95,13 +98,21 @@ def test_pairs_are_filtered_sorted_and_paged_on_the_server(env):
     assert [p["id"] for p in page["items"]] == ["K-2|p-2"] and page["total"] == 3
 
 
-def test_live_updates_carry_only_the_top_open_windows(env, monkeypatch):
+def test_live_updates_carry_the_best_picks_first(env, monkeypatch):
     _, svc = env
-    eps = [{"pair": f"K-{i}|p-{i}", "direction": "K:YES+P:NO", "profit": float(i)} for i in range(30)]
+    now = time.time()
+
+    def ep(i, days, edge=0.01, age=60):
+        return {"pair": f"K-{i}|p-{i}", "direction": "K:YES+P:NO", "start_ts": now - age, "edge": edge,
+                "profit": 1.0, "cost": 100.0, "days": days}
+
+    eps = [ep(i, days=30) for i in range(25)]  # resolve too late to be picks
+    eps += [ep(100, days=2), ep(101, days=0.2), ep(102, days=0.2, edge=0.2), ep(103, days=0.2, age=0)]
     monkeypatch.setattr(svc.scanner.episodes, "snapshot", lambda: eps)
     st = svc.state()
-    assert st["open_count"] == 30 and len(st["open"]) == 20
-    assert st["open"][0]["profit"] == 29.0
+    assert st["open_count"] == 29 and len(st["open"]) == 20 and st["open_picks"] == 2
+    assert [e["pair"] for e in st["open"][:2]] == ["K-101|p-101", "K-100|p-100"]  # soonest first
+    assert st["open"][2]["why"] is not None
 
 
 def test_remove_pairs(env):

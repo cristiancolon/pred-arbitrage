@@ -94,8 +94,10 @@ def _bucket(hours: float, points: int) -> float:
     return max(3.0, hours * 3600 / points)
 
 
-def overview(db: sqlite3.Connection, hours: float, sim: dict | None = None) -> dict:
-    """``sim``: bankroll simulation settings (bankroll, min_window_s, min_annualized)."""
+def overview(db: sqlite3.Connection, hours: float, bankroll_usd: float = 0.0,
+             rules: bankroll.PickRules | None = None) -> dict:
+    """With ``rules``, picks are counted separately and ``bankroll_usd`` is simulated."""
+    rules = rules or bankroll.PickRules()
     now = time.time()
     since = now - hours * 3600
     b = _bucket(hours, 360)
@@ -113,19 +115,21 @@ def overview(db: sqlite3.Connection, hours: float, sim: dict | None = None) -> d
     pb = 3600.0 if hours <= 48 else (6 * 3600.0 if hours <= 24 * 7 else 86400.0)
     start = since - (since % pb)
     n = int((now - start) // pb) + 1
-    buckets = [{"ts": start + i * pb, "windows": 0, "profit": 0.0, "capital": 0.0} for i in range(n)]
-    eps = db.execute("SELECT start_ts, end_ts, max_profit, cost_at_max, max_top_edge, days_to_resolve "
-                     "FROM episodes WHERE start_ts >= ?", (since,)).fetchall()
+    buckets = [{"ts": start + i * pb, "windows": 0, "picks": 0, "profit": 0.0, "capital": 0.0} for i in range(n)]
+    eps = [dict(e) for e in db.execute(
+        "SELECT start_ts, end_ts, max_profit, cost_at_max, max_top_edge, days_to_resolve "
+        "FROM episodes WHERE start_ts >= ?", (since,))]
+    picks = 0
     for e in eps:
-        i = min(n - 1, int((e[0] - start) // pb))
+        i = min(n - 1, int((e["start_ts"] - start) // pb))
         buckets[i]["windows"] += 1
-        buckets[i]["profit"] += e[2] or 0
-        buckets[i]["capital"] += e[3] or 0
-    durations = [e[1] - e[0] for e in eps]
-    simulated = None
-    if sim and sim.get("bankroll"):
-        simulated = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"],
-                                      sim["min_annualized"], sim.get("max_edge"))
+        if rules.window_reason(e) is None:
+            picks += 1
+            buckets[i]["picks"] += 1
+            buckets[i]["profit"] += e["max_profit"] or 0
+            buckets[i]["capital"] += e["cost_at_max"] or 0
+    durations = [e["end_ts"] - e["start_ts"] for e in eps]
+    simulated = bankroll.simulate(eps, bankroll_usd, rules, now) if bankroll_usd else None
     return {
         "hours": hours, "since": since, "bucket_s": b, "profit_bucket_s": pb, "sim": simulated,
         "edge": edge, "latency": latency,
@@ -135,7 +139,8 @@ def overview(db: sqlite3.Connection, hours: float, sim: dict | None = None) -> d
             "avg_sweep_ms": (round(sum(r[3] * r[5] for r in rows if r[3] is not None)
                                    / sum(r[5] for r in rows if r[3] is not None))
                              if any(r[3] is not None for r in rows) else None),
-            "windows": len(eps), "profit": sum(e[2] or 0 for e in eps), "capital": sum(e[3] or 0 for e in eps),
+            "windows": len(eps), "picks": picks, "rules": rules.describe(),
+            "profit": sum(e["max_profit"] or 0 for e in eps), "capital": sum(e["cost_at_max"] or 0 for e in eps),
             "median_duration": statistics.median(durations) if durations else None,
             "best_edge": best[0] if best else None, "best_pair": best[1] if best else None,
             "best_dir": best[2] if best else None, "best_ts": best[3] if best else None,
@@ -165,20 +170,30 @@ def pair_detail(db: sqlite3.Connection, pair: str, hours: float) -> dict:
     }
 
 
-def opportunities(db: sqlite3.Connection, hours: float) -> dict:
+def opportunities(db: sqlite3.Connection, hours: float, rules: bankroll.PickRules | None = None,
+                  picks_only: bool = False) -> dict:
+    """Windows in the last ``hours``, newest first, each with its return per year
+    (``rate``) and why it isn't a pick (``why``, None for picks)."""
+    rules = rules or bankroll.PickRules()
     since = time.time() - hours * 3600
     eps = [dict(r) for r in db.execute(
         "SELECT pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, max_size, cost_at_max, "
         "days_to_resolve FROM episodes WHERE start_ts >= ? ORDER BY start_ts DESC", (since,))]
-    names = titles(db, sorted({e["pair"] for e in eps}))
     for e in eps:
+        e["rate"] = bankroll.window_rate(e)
+        e["why"] = rules.window_reason(e)
+    n_all, n_picks = len(eps), sum(e["why"] is None for e in eps)
+    if picks_only:
+        eps = [e for e in eps if e["why"] is None]
+    names = titles(db, sorted({e["pair"] for e in eps[:500]}))
+    for e in eps[:500]:
         for key, value in names.get(e["pair"], {}).items():
             e.setdefault(key, value)  # never overwrite the episode's own fields
     durations = [e["end_ts"] - e["start_ts"] for e in eps]
     edges = [e["max_top_edge"] or 0 for e in eps]
     return {
-        "hours": hours,
-        "episodes": eps[:500], "total": len(eps),
+        "hours": hours, "rules": rules.describe(), "picks_only": picks_only,
+        "episodes": eps[:500], "total": len(eps), "counts": {"all": n_all, "picks": n_picks},
         "durations": [{"label": lab, "count": sum(lo <= d < hi for d in durations)} for lo, hi, lab in DURATION_BUCKETS],
         "edges": [{"label": lab, "count": sum(lo <= x < hi for x in edges),
                    "profit": sum(e["max_profit"] or 0 for e in eps if lo <= (e["max_top_edge"] or 0) < hi)}

@@ -27,15 +27,18 @@ pmus_rps = 15.0
 min_edge = 0.0
 
 # Your total bankroll in dollars, assumed split evenly across the two venues (each
-# leg is paid for on its own venue). Every window is sized to what that buys, and
-# the dashboard simulates one bankroll: windows taken in order, stakes tied up until
-# the market resolves, skipping windows open less than sim_min_window_s or returning
-# less than sim_min_annualized_return a year. 0 = unlimited (full book depth).
-# Changing it re-sizes recorded history at the next start.
-bankroll_usd = 200.0
-sim_min_window_s = 1.0
-sim_min_annualized_return = 0.10
-sim_max_edge = 0.05             # bigger edges are usually a rules mismatch or a stale quote
+# leg is paid for on its own venue). Every window is sized to what that buys.
+# 0 = unlimited (full book depth). Changing it re-sizes recorded history at the next
+# start.
+bankroll_usd = 300.0
+
+# Picks: the windows worth taking. Money is tied up until the market resolves, so
+# windows are ranked by return per year of lock-up; a pick must also pass these.
+# The dashboard's bankroll simulation funds the best open picks first.
+pick_min_window_s = 1.0            # open at least this long (seconds)
+pick_max_days = 7.0                # resolves within this many days (0 = no limit)
+pick_min_annualized_return = 1.0   # returns at least this per year (1.0 = 100%)
+pick_max_edge = 0.05               # bigger edges are usually a rules mismatch or a stale quote (0 = no limit)
 
 # If you qualify for Polymarket US's volume rebate on taker fees (10/25/50%).
 pmus_taker_rebate = 0.0

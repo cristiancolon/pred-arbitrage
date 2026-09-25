@@ -34,7 +34,7 @@ function Connection() {
 // Its counters change with every live update, so they live here rather than in App:
 // re-rendering App would re-render the whole page underneath it every second.
 function Sidebar({ page }) {
-  const open = useStore((s) => s.state?.open_count || 0);
+  const open = useStore((s) => s.state?.open_picks || 0);
   const err = useStore((s) => s.state?.scanner?.last_error);
   const now = useNow(5000);
   const counts = { opportunities: open || null };

@@ -147,6 +147,17 @@ export function compact(n) {
 export function int(n) {
   return n === null || n === undefined ? "—" : Math.round(n).toLocaleString();
 }
+// Return per year of lock-up (1.0 = 100%).
+export function perYear(r, { suffix = "/yr" } = {}) {
+  if (r === null || r === undefined) return "—";
+  return `${Math.round(r * 100).toLocaleString()}%${suffix}`;
+}
+// The pick rules in words, e.g. "resolves within 7 days, returns 100%+ a year, edge up to 5¢, open 1 s+".
+export function ruleText(r) {
+  if (!r) return "";
+  return [r.max_days ? `resolves within ${r.max_days} days` : null, `returns ${Math.round(r.min_annualized * 100)}%+ a year`,
+    r.max_edge ? `edge up to ${Math.round(r.max_edge * 100)}¢` : null, `open ${r.min_window_s} s+`].filter(Boolean).join(", ");
+}
 export function price(p) {
   if (p === null || p === undefined) return "—";
   return `${(p * 100).toFixed(1).replace(/\.0$/, "")}¢`;

@@ -163,3 +163,13 @@ def test_daemon_restarts_and_stops():
     assert took < 5 and d.state == "stopped"
     assert ("discover", "hello") in lines
     assert any("restarting" in t for _, t in lines)
+
+
+def test_kalshi_creation_wakes_discovery(tmp_path):
+    d, db = _discovery(tmp_path)
+    seen = []
+    listings = discover.KalshiListings("ws://unused", None, lambda t: (seen.append(t), d.kalshi_wake.set()))
+    listings._handle({"type": "market_lifecycle_v2", "msg": {"event_type": "settled", "market_ticker": "X"}}, 0)
+    assert not d.kalshi_wake.is_set()
+    listings._handle({"type": "market_lifecycle_v2", "msg": {"event_type": "created", "market_ticker": CIN}}, 0)
+    assert seen == [CIN] and d.kalshi_wake.is_set()

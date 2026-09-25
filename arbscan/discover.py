@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from . import jev
 from .catalog import ROW_SQL, kalshi_row, pm_row
 from .config import Config
+from .feeds import KALSHI_WS_PATH, _Feed
 from .fees import kalshi_taker_coef
 from .http import Api, ApiError, make_client
 from .match import Candidate, LiveIndex, auto_approve
@@ -42,6 +43,36 @@ KALSHI_LISTABLE = ("active", "initialized")  # "initialized": listed, opens for 
 SUMMARY_EVERY_S = 600
 
 
+class KalshiListings(_Feed):
+    """Kalshi's lifecycle channel announces each market as it is created. With a
+    Kalshi API key, discovery checks Kalshi the moment one arrives instead of waiting
+    for the next poll (which stays as the backstop)."""
+
+    name = "kalshi-listings"
+
+    def __init__(self, url: str, signer, on_created):
+        super().__init__(url, lambda _: None)
+        self.signer = signer
+        self.on_created = on_created
+
+    def _headers(self) -> dict[str, str]:
+        return self.signer.headers("GET", KALSHI_WS_PATH)
+
+    async def _on_connect(self) -> None:
+        await self._send({"id": 1, "cmd": "subscribe", "params": {"channels": ["market_lifecycle_v2"]}})
+
+    async def _sync(self) -> None:
+        pass
+
+    def _handle(self, msg: dict, recv: float) -> None:
+        body = msg.get("msg") or {}
+        if msg.get("type") == "market_lifecycle_v2" and body.get("event_type") == "created":
+            self.on_created(body.get("market_ticker"))
+
+    def _disconnected(self) -> None:
+        pass
+
+
 class Discovery:
     def __init__(self, cfg: Config, db: sqlite3.Connection, kalshi: Kalshi, pm: PolymarketUS):
         self.cfg, self.db, self.kalshi, self.pm = cfg, db, kalshi, pm
@@ -55,6 +86,7 @@ class Discovery:
         self.events: dict[str, dict] = {}
         self.series_fee: dict[str, float] = {}
         self.window: Counter[str] = Counter()
+        self.kalshi_wake = asyncio.Event()  # set when Kalshi announces a new market
 
     def _catalog_marks(self) -> tuple:
         """When each venue's catalog was last rebuilt: every row a refresh writes gets
@@ -195,6 +227,10 @@ class Discovery:
         due = {"K": 0.0, "P": 0.0, "rebuild": time.monotonic() + 60, "summary": time.monotonic() + SUMMARY_EVERY_S}
         period = {"K": self.cfg.kalshi_discovery_s, "P": self.cfg.pmus_discovery_s}
         while not stop.is_set():
+            if self.kalshi_wake.is_set():
+                self.kalshi_wake.clear()
+                await asyncio.sleep(0.5)  # a new event usually lists several markets at once
+                due["K"] = 0.0
             now = time.monotonic()
             for venue in ("K", "P"):
                 if now >= due[venue]:
@@ -210,10 +246,11 @@ class Discovery:
                 self.summary()
                 due["summary"] = time.monotonic() + SUMMARY_EVERY_S
             wait = max(0.05, min(due.values()) - time.monotonic())
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=wait)
-            except asyncio.TimeoutError:
-                pass
+            woken = asyncio.create_task(self.kalshi_wake.wait())
+            stopping = asyncio.create_task(stop.wait())
+            await asyncio.wait({woken, stopping}, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+            woken.cancel()
+            stopping.cancel()
 
 
 async def run(cfg: Config, db: sqlite3.Connection, once: bool = False) -> None:
@@ -230,4 +267,16 @@ async def run(cfg: Config, db: sqlite3.Connection, once: bool = False) -> None:
                 await d.step(venue)
             d.summary()
             return
-        await d.run_forever(stop)
+        tasks = []
+        if cfg.kalshi_key_id and cfg.kalshi_private_key_path:
+            from .auth import KalshiSigner
+
+            listings = KalshiListings(cfg.kalshi_ws_url,
+                                      KalshiSigner.from_file(cfg.kalshi_key_id, cfg.kalshi_private_key_path),
+                                      lambda ticker: d.kalshi_wake.set())
+            tasks.append(asyncio.create_task(listings.run(stop)))
+            log.info("listening for Kalshi market creations")
+        try:
+            await d.run_forever(stop)
+        finally:
+            await asyncio.gather(*tasks, return_exceptions=True)

@@ -360,8 +360,40 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `discovered` | markets live discovery added between refreshes, with how many suggestions each got |
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |
-| `episodes` | contiguous profitable runs: start/end, peak edge, peak profit, capital, days to resolution |
+| `episodes` | contiguous profitable runs: start/end, peak edge, peak profit, capital, days to resolution; `cut` = 1 if the scanner stopped while it was open |
 | `sweeps` | scanner health: one row per sweep (polling) or per second (streaming, where `dur_ms` is the median exchange-to-edge latency) |
+| `results` | how each paired market settled: what one YES contract paid (`yes_value`), the venue's result and status, when it closed and settled |
+| `window_outcomes` (view) | every window whose two markets have settled, with `payout_per_pair` and `realized_at_peak` |
+| `pair_outcomes` (view) | every approved pair whose markets have settled, and whether they settled as one bet (`consistent`) |
+
+### Settlement results, for backtesting
+
+A trade only worked if both markets settled as one bet. The scanner records each
+venue's published result for every market that has been paired, had a profitable
+window or a paper trade (`arbscan/results.py`): Kalshi's the moment its lifecycle feed
+announces it, and both venues' from their APIs every 10 minutes once a market has
+closed (every 6 hours before that) until the result is in. Polymarket US doesn't say
+when it resolved a market, so `first_final_ts` records when we first saw it.
+
+`window_outcomes` joins the results to the windows. `payout_per_pair` is what one
+contract pair in the window's direction paid: 1 when the markets settled as one bet,
+0 or 2 when they didn't, so for example:
+
+```sql
+-- How often did profitable windows really pay, and what would taking them at their peak have made?
+SELECT COUNT(*) AS windows, SUM(payout_per_pair = 1) AS paid, SUM(realized_at_peak) AS realized
+FROM window_outcomes;
+
+-- Approved pairs that did not settle as one bet (what Jev or a rule got wrong).
+SELECT * FROM pair_outcomes WHERE NOT consistent;
+```
+
+Together with `opportunities` (both order books, top 10 levels, at most once a second
+per pair and direction), `quotes` (every top-of-book change) and `paper_trades`, that
+is enough to replay a strategy and score it on what actually settled. Windows still
+open when the service restarts are saved with `cut = 1`; if the scanner is back within
+10 minutes and the window is still open, the saved row is reopened instead of a second
+one starting.
 
 ## Tests
 

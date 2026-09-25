@@ -74,18 +74,46 @@ class Episode:
 
 
 class Episodes:
-    """Tracks runs of consecutive positive observations per (pair, direction)."""
+    """Tracks runs of consecutive positive observations per (pair, direction).
 
-    def __init__(self, db: sqlite3.Connection):
+    A window still open when the scanner stops is saved with ``cut = 1``. If the
+    scanner is back within ``RESUME_S`` and the same window is still open, the saved
+    row is reopened instead of starting a second one, so a restart doesn't split it.
+    """
+
+    RESUME_S = 600.0
+
+    def __init__(self, db: sqlite3.Connection, reader: sqlite3.Connection | None = None):
         self.db = db
         self.open: dict[tuple[str, str], Episode] = {}
+        self.resumable: dict[tuple[str, str], tuple[int, Episode]] = {}
+        if reader is not None:
+            for r in reader.execute(
+                    "SELECT rowid, pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, max_size, "
+                    "first_profit, cost_at_max, days_to_resolve FROM episodes WHERE cut = 1 AND end_ts >= ?",
+                    (time.time() - self.RESUME_S,)):
+                self.resumable[(r[1], r[2])] = (r[0], Episode(*r[3:12]))
+
+    def _resume(self, key: tuple[str, str], ts: float) -> Episode | None:
+        saved = self.resumable.pop(key, None)
+        if saved is None or ts - saved[1].last_ts > self.RESUME_S:
+            return None
+        rowid, ep = saved
+        self.db.execute("DELETE FROM episodes WHERE rowid = ?", (rowid,))
+        log.info("RESUME %s %s  after a restart", key[0], key[1])
+        return ep
 
     def observe(self, key: tuple[str, str], ts: float, res: ArbResult | None, days: float | None) -> None:
         if res is None or not res.positive:
+            self.resumable.pop(key, None)  # it closed while we were away
             self.close(key, ts)
             return
         edge = res.top_edge or 0.0
         ep = self.open.get(key)
+        if ep is None and self.resumable:
+            ep = self._resume(key, ts)
+            if ep is not None:
+                self.open[key] = ep
         if ep is None:
             self.open[key] = Episode(ts, ts, 1, edge, res.profit, res.size, res.profit, res.cost, days,
                                      edge, res.profit, res.size, res.cost)
@@ -103,15 +131,15 @@ class Episodes:
         ep.max_size = max(ep.max_size, res.size)
         ep.edge, ep.profit, ep.size, ep.cost, ep.days = edge, res.profit, res.size, res.cost, days
 
-    def close(self, key: tuple[str, str], ts: float) -> None:
+    def close(self, key: tuple[str, str], ts: float, cut: bool = False) -> None:
         ep = self.open.pop(key, None)
         if ep is None:
             return
         self.db.execute(
             "INSERT INTO episodes (pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, "
-            "max_size, first_profit, cost_at_max, days_to_resolve) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "max_size, first_profit, cost_at_max, days_to_resolve, cut) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (key[0], key[1], ep.start_ts, ts, ep.n_obs, ep.max_top_edge, ep.max_profit,
-             ep.max_size, ep.first_profit, ep.cost_at_max, ep.days),
+             ep.max_size, ep.first_profit, ep.cost_at_max, ep.days, 1 if cut else None),
         )
         log.info("CLOSE %s %s  lasted <=%.0fs  max profit $%.2f", key[0], key[1], ts - ep.start_ts, ep.max_profit)
 
@@ -120,8 +148,9 @@ class Episodes:
             self.close(key, ts)
 
     def close_all(self) -> None:
+        """The scanner is stopping: save open windows as cut short."""
         for key, ep in list(self.open.items()):
-            self.close(key, ep.last_ts)
+            self.close(key, ep.last_ts, cut=True)
 
     def snapshot(self) -> list[dict]:
         return [{"pair": k[0], "direction": k[1], **asdict(ep)} for k, ep in self.open.items()]
@@ -156,7 +185,7 @@ class Scanner:
         self.meta_ts = 0.0
         self.last_quote: dict[str, tuple] = {}
         self.last_depth: dict[str, float] = {}
-        self.episodes = Episodes(db)
+        self.episodes = Episodes(db, reader=db)
         self.warned: set[str] = set()
         self.finished: set[str] = set()  # pair ids whose markets have closed
         # Live view for the dashboard.

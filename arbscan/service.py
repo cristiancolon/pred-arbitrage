@@ -13,6 +13,7 @@ from . import jev, rescale
 from .config import Config
 from .http import make_client
 from .jobs import Daemon, RefreshJob
+from .results import ResultsRecorder
 from .scanner import make_scanner, run_loop
 from .web.app import Hub, Service, create_app
 
@@ -72,5 +73,9 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
             tasks.append(run_loop(scanner, stop))
         if discovery is not None:
             tasks.append(discovery.run(stop))
+        if run_scanner:
+            recorder = ResultsRecorder(svc.read, svc.write, scanner.kalshi, scanner.pm,
+                                       lambda: [p.id for p in scanner.pairs.pairs], lambda: scanner.finished)
+            tasks.append(recorder.run(stop))
         await asyncio.gather(*tasks)
     log.info("stopped")

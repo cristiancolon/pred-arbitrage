@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     max_size INTEGER,
     first_profit REAL,
     cost_at_max REAL,               -- capital needed for max_profit
-    days_to_resolve REAL
+    days_to_resolve REAL,
+    cut INTEGER                     -- 1: still open when the scanner stopped (resumed if it comes back soon)
 );
 CREATE INDEX IF NOT EXISTS episodes_start ON episodes (start_ts);
 
@@ -175,13 +176,59 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 );
 CREATE INDEX IF NOT EXISTS paper_ts ON paper_trades (ts);
 CREATE INDEX IF NOT EXISTS paper_status ON paper_trades (status);
+
+-- How each market we've paired settled (results.py): what one YES contract paid.
+CREATE TABLE IF NOT EXISTS results (
+    venue TEXT NOT NULL,            -- K | P
+    id TEXT NOT NULL,               -- Kalshi ticker | Polymarket US slug
+    status TEXT,                    -- the venue's status when last read
+    yes_value REAL,                 -- $ paid per YES contract (0-1); NULL until the venue publishes a result
+    result TEXT,                    -- Kalshi: yes | no | scalar; Polymarket US: the winning outcome's name
+    closed_ts REAL,                 -- scheduled close / end
+    settled_ts REAL,                -- when the venue determined or settled it (Kalshi only)
+    first_final_ts REAL,            -- when we first saw the result
+    checked_ts REAL NOT NULL,       -- last lookup
+    raw TEXT,                       -- the venue's fields we read, JSON
+    PRIMARY KEY (venue, id)
+);
+
+-- Every recorded window whose two markets have settled. payout_per_pair is what one
+-- contract pair in the window's direction paid: 1.0 when both markets settled as one
+-- bet (the arb worked), 0 or 2 when they didn't. peak_pairs * payout_per_pair -
+-- cost_at_max is what taking the window at its peak would really have made.
+CREATE VIEW IF NOT EXISTS window_outcomes AS
+SELECT e.rowid AS episode, e.pair, e.direction, e.start_ts, e.end_ts, e.max_top_edge, e.max_profit, e.cost_at_max,
+       e.max_profit + e.cost_at_max AS peak_pairs, e.days_to_resolve,
+       rk.yes_value AS k_yes_value, rp.yes_value AS p_yes_value,
+       (CASE WHEN e.direction LIKE 'K:YES%' THEN rk.yes_value ELSE 1 - rk.yes_value END)
+         + (CASE WHEN e.direction LIKE '%P:YES' THEN rp.yes_value ELSE 1 - rp.yes_value END) AS payout_per_pair,
+       (e.max_profit + e.cost_at_max)
+         * ((CASE WHEN e.direction LIKE 'K:YES%' THEN rk.yes_value ELSE 1 - rk.yes_value END)
+            + (CASE WHEN e.direction LIKE '%P:YES' THEN rp.yes_value ELSE 1 - rp.yes_value END))
+         - e.cost_at_max AS realized_at_peak
+FROM episodes e
+JOIN results rk ON rk.venue = 'K' AND rk.id = substr(e.pair, 1, instr(e.pair, '|') - 1)
+JOIN results rp ON rp.venue = 'P' AND rp.id = substr(e.pair, instr(e.pair, '|') + 1)
+WHERE rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
+
+-- Approved pairs whose markets have both settled: did they settle as one bet?
+CREATE VIEW IF NOT EXISTS pair_outcomes AS
+SELECT d.kalshi, d.pm, d.decision AS relation, d.source, rk.yes_value AS k_yes_value, rp.yes_value AS p_yes_value,
+       rk.result AS k_result, rp.result AS p_result,
+       CASE WHEN d.decision = 'same' THEN abs(rk.yes_value - rp.yes_value) < 0.001
+            ELSE abs(rk.yes_value + rp.yes_value - 1) < 0.001 END AS consistent,
+       max(rk.first_final_ts, rp.first_final_ts) AS known_ts
+FROM decisions d
+JOIN results rk ON rk.venue = 'K' AND rk.id = d.kalshi
+JOIN results rp ON rp.venue = 'P' AND rp.id = d.pm
+WHERE d.decision IN ('same', 'inverse') AND rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
 """
 
 
 # Columns added after the first release, so older databases can be upgraded in place.
 MIGRATIONS = {
     "decisions": [("source", "TEXT")],
-    "episodes": [("cost_at_max", "REAL")],
+    "episodes": [("cost_at_max", "REAL"), ("cut", "INTEGER")],
     "sweeps": [("best_edge", "REAL"), ("best_pair", "TEXT"), ("best_dir", "TEXT")],
 }
 

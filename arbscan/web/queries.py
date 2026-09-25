@@ -77,6 +77,8 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
     windows, profit, capital = db.execute(
         "SELECT COUNT(*), COALESCE(SUM(max_profit), 0), COALESCE(SUM(cost_at_max), 0) FROM episodes "
         "WHERE start_ts >= ?", (now - 86400,)).fetchone()
+    settled, consistent = db.execute("SELECT COUNT(*), COALESCE(SUM(consistent), 0) FROM pair_outcomes").fetchone()
+    results_n = db.execute("SELECT COUNT(*) FROM results WHERE yes_value IS NOT NULL").fetchone()[0]
     return {
         "catalog": {"kalshi": cat.get("K", {"count": 0, "updated": None}),
                     "pm": cat.get("P", {"count": 0, "updated": None})},
@@ -87,6 +89,7 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
                    "rejected": decisions.get("reject", 0), "auto": auto,
                    "jev": {"approved": jev.get(0, 0), "rejected": jev.get(1, 0), "unsure": jev_unsure}},
         "report": {"windows_24h": windows, "profit_24h": profit, "capital_24h": capital},
+        "settled": {"pairs": settled, "consistent": consistent, "results": results_n},
     }
 
 
@@ -162,8 +165,12 @@ def pair_detail(db: sqlite3.Connection, pair: str, hours: float) -> dict:
     eps = [dict(r) for r in db.execute(
         "SELECT direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, max_size, cost_at_max, "
         "days_to_resolve FROM episodes WHERE pair = ? ORDER BY start_ts DESC LIMIT 50", (pair,))]
+    settled = {r["venue"]: {"yes_value": r["yes_value"], "result": r["result"], "known_ts": r["first_final_ts"]}
+               for r in db.execute("SELECT * FROM results WHERE ((venue = 'K' AND id = ?) OR (venue = 'P' AND id = ?)) "
+                                   "AND yes_value IS NOT NULL", (k, p))}
     return {
         "pair": pair,
+        "settled": settled,
         "kalshi": markets(db, "K", [k], rules=True).get(k),
         "pm": markets(db, "P", [p], rules=True).get(p),
         "history": history, "since": since, "episodes": eps,

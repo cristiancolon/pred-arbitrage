@@ -1,5 +1,5 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
-import { api, cents, dateTime, days, dirLabel, duration, int, money, navigate, price, splitTitle, toast, useDebounced, useFetch, useNow } from "../lib.js";
+import { api, cents, dateTime, days, dirLabel, duration, int, money, navigate, price, splitTitle, toast, useDebounced, useFetch, useNow, useStore } from "../lib.js";
 import { ChartCard, LineChart } from "../charts.js";
 import { Badge, Banner, Card, DataTable, DivBar, Drawer, Edge, Empty, Icon, Pager, PairName, RelationChip, Seg, Status } from "../ui.js";
 import { Mapping, RulesCompare } from "../rules.js";
@@ -17,6 +17,25 @@ function bestEdge(p) {
 }
 
 const PAGE = 100;
+
+// How approved pairs have settled so far (results.py records both venues' results).
+function Settled() {
+  const st = useStore((s) => s.state?.pipeline?.settled);
+  if (!st?.pairs) return null;
+  const bad = st.pairs - st.consistent;
+  return html`<span class="muted" style="font-size:12.5px" title="Approved pairs whose markets have both settled">
+    ${int(st.pairs)} settled: ${int(st.consistent)} as one bet${bad ? html`, <b style="color:var(--critical)">${int(bad)} not</b>` : ""}</span>`;
+}
+
+function Outcome({ relation, settled }) {
+  const k = settled?.K, p = settled?.P;
+  if (!k || !p) return null;
+  const one = relation === "inverse" ? Math.abs(k.yes_value + p.yes_value - 1) < 0.001 : Math.abs(k.yes_value - p.yes_value) < 0.001;
+  const label = (v, r) => r || (v >= 0.5 ? "YES" : "NO");
+  return html`<${Banner} tone=${one ? "info" : "critical"}>
+    <b>Settled.</b> Kalshi: ${label(k.yes_value, k.result)} · Polymarket US: ${label(p.yes_value, p.result)}.
+    ${one ? " Both settled as one bet, so an arb here paid $1 a pair." : " They did not settle as one bet: an arb here would have lost."}<//>`;
+}
 
 export function Pairs({ params }) {
   const [q, setQ] = useState("");
@@ -57,6 +76,7 @@ export function Pairs({ params }) {
       <${Seg} label="Relation" value=${rel} onChange=${setRel} options=${[
         { value: "all", label: "Any" }, { value: "same", label: "Same" }, { value: "inverse", label: "Inverse" }]} />
       <span class="spacer"></span>
+      <${Settled} />
       ${counts.finished > 0 && html`<button class="btn" onClick=${prune} title="Delete pairs whose markets have closed from pairs.csv"><${Icon} name="trash" size=${14} />Remove ${int(counts.finished)} finished</button>`}
     </div>
     <${Card} title="Watched pairs" sub="Live top of book from both venues. Edges are per $1 pair after both taker fees; the better of the two directions is shown." flush>
@@ -96,6 +116,7 @@ function PairDrawer({ id, onClose, onRemoved }) {
         ${live?.days != null && html`<${Badge} icon="clock">Resolves in ${days(live.days)}<//>`}
         ${(data.open || []).length > 0 && html`<${Badge} tone="good" icon="check">Profitable now<//>`}
       </div>
+      <${Outcome} relation=${data.relation} settled=${data.settled} />
       ${data.relation && k && p && html`<${Mapping} relation=${data.relation} k=${k} p=${p} />`}
       <div class="grid cols-2">
         ${dirs.map((d) => html`<div class="card tile">

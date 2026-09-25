@@ -1,8 +1,9 @@
 # arbscan
 
 A read-only scanner that measures how much cross-venue arbitrage actually exists
-between **Kalshi** and **Polymarket US**. It never places orders and needs no API keys:
-both venues publish market data publicly.
+between **Kalshi** and **Polymarket US**. It never places orders and needs no exchange
+API keys: both venues publish market data publicly. An optional TypeSafe API key lets
+the Jev model review suggested pairs for you.
 
 The point is to answer "is there money here?" with data before writing any trading code.
 
@@ -20,8 +21,10 @@ catalog  ->  match  ->  review  ->  scan  ->  report
    spread signs. It also works out whether Polymarket's YES is Kalshi's YES (**same**)
    or Kalshi's NO (**inverse**, e.g. Kalshi "Braves win" vs a Reds/Braves moneyline
    whose long side is the Reds).
-3. **review** shows each suggestion with both rulebooks side by side. You approve it
-   as same/inverse or reject it. Approved pairs go to `pairs.csv`.
+3. **review** decides which suggestions are really the same bet. With a TypeSafe key,
+   Jev reads both rulebooks for each one: it approves clear matches, rejects clear
+   mismatches, and leaves the rest in a queue that shows both rulebooks side by side
+   for you to decide. Approved pairs go to `pairs.csv`.
 4. **scan** polls the approved pairs every few seconds. For each pair it checks both
    directions (e.g. buy Kalshi YES + Polymarket NO) and computes the edge after both
    taker fees. When that edge is positive it fetches depth and walks both order
@@ -56,7 +59,8 @@ to break even.
 ## The dashboard
 
 `arbscan serve` runs everything in one process: the scanner, the scheduled refresh
-(catalog, then match, every 6 hours), and a web dashboard at `http://<pi>:8787/`.
+(catalog, match and Jev review, every hour), and a web dashboard at `http://<pi>:8787/`.
+Nothing needs a button press: new markets flow through to the scanner on their own.
 
 - **Overview.** The five pipeline stages with live status. A chart of how close the
   best watched pair got to breakeven over time. Open opportunities and a
@@ -68,7 +72,9 @@ to break even.
 - **Review.** The review queue in the browser. Each candidate shows a diagram of
   which outcome on one venue matches which on the other, plus both rulebooks side by
   side with numbers, dates and settlement wording (draws, postponement, exclusions)
-  highlighted. Keys: `S` same, `I` inverse, `R` reject, `J`/`K` next/previous.
+  highlighted. Keys: `S` same, `I` inverse, `R` reject, `J`/`K` next/previous. With
+  Jev on, each pair it couldn't decide shows why, and a "Rejected by Jev" view lets
+  you spot-check its rejections and overrule one by approving it.
 - **Opportunities.** Every profitable window: how long it lasted, how big the edge
   got, the capital it needed, and a flag on the ones that look like a rules
   mismatch.
@@ -100,8 +106,9 @@ The service points at wherever the repo lives. If you move it, re-run
 
 Then open `http://<pi-address>:8787/`. On first start the service downloads the
 market catalog and runs matching by itself; this takes about two minutes, and you
-can watch it on the **Refresh job** page. Then approve pairs in **Review**. The
-scanner picks them up on its next sweep.
+can watch it on the **Refresh job** page. With a Jev key (see below), pairs are then
+approved automatically; without one, approve them in **Review**. The scanner picks
+them up on its next sweep.
 
 ```sh
 journalctl --user -u arbscan -f        # live log, including OPEN/CLOSE lines per opportunity
@@ -115,6 +122,7 @@ Each stage is also a CLI command:
 ```sh
 .venv/bin/arbscan catalog              # ~1.5 min
 .venv/bin/arbscan match                # ~1 min on a Pi 4
+.venv/bin/arbscan autoreview           # Jev review; --dry-run to only print verdicts
 .venv/bin/arbscan review               # terminal review; --list to just print
 .venv/bin/arbscan scan                 # scanner only; Ctrl-C to stop
 .venv/bin/arbscan report --hours 24
@@ -139,12 +147,58 @@ MLB moneylines), add an `[[auto_approve]]` rule to `config.toml`; see
 `config.example.toml`. Each refresh then approves confident, mutual-best matches for
 that series automatically.
 
+### Automatic review with Jev
+
+[Jev](https://docs.typesafe.ai) is TypeSafe's decision model: it answers typed
+questions about some text with calibrated probabilities instead of generating text.
+For each undecided suggestion, `arbscan/jev.py` sends both markets' titles, outcome
+labels and rules, and asks three questions in one call:
+
+- Which Polymarket bet (YES, NO, or neither) pays out in exactly the same situations
+  as Kalshi YES?
+- Do both markets count the same competition and scope? (This catches conference vs
+  national stat leaders, and Hank Aaron Award vs MVP.)
+- Do Polymarket's rules contradict its own title? About half of Polymarket US's
+  college and NFL "+X" spread markets say YES is the underdog covering in the title
+  but the favourite winning by more than X in the rules.
+
+A pair is approved only if Jev picks the side the matcher proposed (P ≥ 0.6), the
+scope matches and the rules agree. It is rejected if Jev is confident neither side is
+the same bet. Everything else stays in the Review queue, with Jev's reason. The
+questions and thresholds live together at the top of `jev.py`.
+
+Validation (jev-1.13.0): on ~140 hand-labelled pairs it approved all 76 equivalent ones
+and none of the 43 wrong games, flipped sides or different competitions. One subtle
+case got through: Kalshi counts a #1 album any time in 2026, while Polymarket only
+counts charts after its market opened. On 70 further pairs it hadn't been tuned on,
+all 50 approvals were correct. Its mistakes lean safe: a few valid pairs get rejected
+or left unsure. Because the scanner never trades, a wrong approval shows up as a
+suspicious opportunity, not a loss. Still, read both rulebooks before trading on one.
+
+Cost is ~900 input tokens per pair at $0.042 per million: about $0.20 for a first
+pass over ~5,000 suggestions (~10 minutes at the default 8 requests/s). After that
+only new pairs, or pairs whose text changed, are sent.
+
+To turn it on, put your key at the top of `config.toml` (which git ignores) and
+restart. It has to go above any `[[auto_approve]]` table, or TOML reads it as part of
+that table:
+
+```sh
+{ echo 'jev_api_key = "apikey_..."'; cat config.toml 2>/dev/null || true; } > config.new
+mv config.new config.toml
+chmod 600 config.toml
+systemctl --user restart arbscan
+```
+
+`TYPESAFE_API_KEY` in the environment works too. `jev_model` is pinned to
+`jev-1.13.0` because the thresholds were tuned on it.
+
 ### Resource use
 
 | | |
 |---|---|
 | Service (scanner + dashboard) | ~60 MB RAM. With a few hundred pairs, each sweep is a handful of requests. |
-| Refresh (every 6 h) | A separate low-priority process for ~2 minutes. It peaks around 200 MB during catalog and match, then exits. |
+| Refresh (hourly) | A separate low-priority process for ~2 minutes (plus the Jev review, which only sends new pairs). It peaks around 200 MB during catalog and match, then exits. |
 | Limits | The systemd unit caps the whole service at 768 MB (soft limit 500 MB), leaving the rest of the Pi's memory to other processes. |
 | Disk | Top-of-book quotes are written only when they change. Depth snapshots are stored only for profitable observations. Expect tens of MB/day for a few hundred pairs. |
 
@@ -159,7 +213,8 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | table | contents |
 |---|---|
 | `markets` | the catalog, including full rules text |
-| `candidates`, `decisions` | matcher output and your review decisions |
+| `candidates`, `decisions` | matcher output and review decisions (`source`: human, rule or jev) |
+| `jev_reviews` | Jev's verdict, reason and answers for every pair it has read |
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |
 | `episodes` | contiguous profitable runs: start/end, peak edge, peak profit, capital, days to resolution |

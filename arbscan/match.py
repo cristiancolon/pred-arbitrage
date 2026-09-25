@@ -34,6 +34,7 @@ from dataclasses import dataclass
 
 from .config import Config
 from .pairs import append_pair
+from .review import record
 
 log = logging.getLogger(__name__)
 
@@ -520,8 +521,7 @@ def auto_approve(cfg: Config, db: sqlite3.Connection, cands: list[Candidate], k_
             if (k_series.get(c.kalshi) == rule.kalshi_series and c.pm.startswith(rule.pm_slug_prefix)
                     and c.score >= rule.min_score and (c.relation == "same" or rule.allow_inverse)):
                 append_pair(cfg.pairs_path, c.kalshi, c.pm, c.relation, f"auto:{rule.kalshi_series}")
-                db.execute("INSERT OR REPLACE INTO decisions VALUES (?,?,?,?)",
-                           (c.kalshi, c.pm, c.relation, time.time()))
+                record(db, c.kalshi, c.pm, c.relation, "rule")
                 n += 1
                 break
     db.commit()

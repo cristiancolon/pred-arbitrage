@@ -1,6 +1,6 @@
 import { html, useCallback, useEffect, useRef, useState } from "../vendor/preact-htm.js";
 import { api, dateTime, duration, highlight, int, pmTitle, price, splitTitle, toast, usePref, useStore } from "../lib.js";
-import { Banner, Card, Empty, Icon, Kbd, RelationChip } from "../ui.js";
+import { Badge, Banner, Card, Empty, Icon, Kbd, RelationChip } from "../ui.js";
 
 const INVERSE_WARNING = html`<b>Inverse pair.</b> Polymarket YES is treated as Kalshi NO. That only hedges if the event
   can't end any other way: no draw or tie, and both venues handle postponement or cancellation the same way.
@@ -30,6 +30,29 @@ export function Mapping({ relation, k, p }) {
       ${inv ? " Kalshi YES + Poly YES, or Kalshi NO + Poly NO." : " Kalshi YES + Poly NO, or Kalshi NO + Poly YES."}
     </div>
   </div>`;
+}
+
+const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+
+const VIEWS = [
+  { value: "pending", label: "All pending" },
+  { value: "unsure", label: "Jev unsure" },
+  { value: "unreviewed", label: "Not read by Jev yet" },
+  { value: "rejected", label: "Rejected by Jev" },
+];
+
+// Jev's verdict and the answers behind it (see arbscan/jev.py for the questions).
+function JevNote({ jev, relation, rejected }) {
+  if (!jev || (!rejected && jev.verdict !== "unsure")) return null;
+  const a = jev.answers || {};
+  const want = relation === "same" ? "yes_side" : "no_side";
+  const facts = a.side && html`<div class="jev-facts">
+    <span>Same bet as proposed <b>${pct(a.side[want])}</b></span><span>Different markets <b>${pct(a.side.neither)}</b></span>
+    <span>Same competition <b>${pct(a.scope)}</b></span><span>Rules contradict title <b>${pct(a.contradiction)}</b></span>
+  </div>`;
+  return rejected
+    ? html`<${Banner} tone="critical"><b>Jev rejected this pair:</b> ${jev.reason.toLowerCase()}. Approving it overrides Jev.${facts}<//>`
+    : html`<${Banner} tone="warning"><b>Jev couldn't decide:</b> ${jev.reason.toLowerCase()}.${facts}<//>`;
 }
 
 function Rules({ text }) {
@@ -69,6 +92,8 @@ export function Review() {
   const [minScore, setMinScore] = usePref("review.min", 0.45);
   const [confident, setConfident] = usePref("review.confident", false);
   const [relation, setRelation] = useState("");
+  const [view, setView] = usePref("review.view", "pending");
+  const jevOn = useStore((s) => s.state?.features?.jev);
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [sel, setSel] = useState(0);
@@ -81,9 +106,10 @@ export function Review() {
     const u = new URLSearchParams({ min_score: minScore, offset, limit: 40 });
     if (confident) u.set("confident", "1");
     if (relation) u.set("relation", relation);
+    if (view !== "pending") u.set("view", view);
     if (q.trim()) u.set("q", q.trim());
     return api(`/api/candidates?${u}`);
-  }, [q, minScore, confident, relation]);
+  }, [q, minScore, confident, relation, view]);
 
   useEffect(() => {
     setLoading(true);
@@ -147,18 +173,25 @@ export function Review() {
           <select class="select" value=${relation} onChange=${(e) => setRelation(e.target.value)} aria-label="Relation">
             <option value="">Same or inverse</option><option value="same">Same only</option><option value="inverse">Inverse only</option>
           </select>
-          <span class="muted num" style="margin-left:auto;font-size:12.5px">${int(total)} pending</span>
+          <span class="muted num" style="margin-left:auto;font-size:12.5px">${int(total)} ${view === "rejected" ? "rejected" : "pending"}</span>
         </div>
+        ${(jevOn || view !== "pending") && html`<select class="select" value=${view} onChange=${(e) => setView(e.target.value)} aria-label="Which candidates">
+          ${VIEWS.map((v) => html`<option value=${v.value}>${v.label}</option>`)}
+        </select>`}
       </div>
       <div class="queue-list" ref=${listRef} style=${loading ? "opacity:.55" : ""}>
         ${items.map((c, i) => html`<div class=${`q-item ${i === sel ? "sel" : ""}`} key=${c.kalshi + c.pm} onClick=${() => setSel(i)}>
           <div class="row1"><${Score} value=${c.score} /><${RelationChip} relation=${c.relation} /><span class="spacer"></span>
-            ${!c.confident && html`<span class="muted" style="font-size:11px" title="No outcome labels to compare">guessed</span>`}</div>
+            ${!c.confident && html`<span class="muted" style="font-size:11px" title="No outcome labels to compare">guessed</span>`}
+            ${view === "rejected" ? html`<${Badge} tone="critical" icon="xcircle">Jev: no<//>`
+              : c.jev?.verdict === "unsure" && html`<span title=${c.jev.reason}><${Badge} tone="warning" icon="alert">Jev unsure<//></span>`}</div>
           <div class="k">${splitTitle(c.k?.title).head}${c.k?.yes_label ? html`<span class="muted"> · ${c.k.yes_label}</span>` : ""}</div>
           <div class="p">Poly US · ${pmTitle(c.p?.title)}</div>
         </div>`)}
         ${items.length < total && html`<div style="padding:12px;text-align:center"><button class="btn sm" onClick=${more}>Load more</button></div>`}
-        ${!loading && !items.length && html`<${Empty} icon="review" title="Queue is empty">Nothing matches these filters. New suggestions arrive after each refresh.<//>`}
+        ${!loading && !items.length && html`<${Empty} icon="review" title="Queue is empty">Nothing matches these filters. ${jevOn
+          ? "Jev reviews new suggestions after each refresh and leaves only the ones it can't decide."
+          : "New suggestions arrive after each refresh."}<//>`}
       </div>
     </section>
 
@@ -174,6 +207,7 @@ export function Review() {
         <div class="actions"><span class="muted num" style="font-size:12px">${sel + 1} of ${int(total)}</span></div>
       </div>
       <div class="card-body grid" style="gap:16px">
+        <${JevNote} jev=${cur.jev} relation=${cur.relation} rejected=${view === "rejected"} />
         ${!cur.confident && html`<${Banner} tone="info">The relation is a guess: Polymarket gives no outcome labels to compare. Check which side each YES refers to.<//>`}
         ${cur.relation === "inverse" && html`<${Banner} tone="warning">${INVERSE_WARNING}<//>`}
         <${Mapping} relation=${cur.relation} k=${cur.k} p=${cur.p} />

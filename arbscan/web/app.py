@@ -21,7 +21,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import review
+from .. import jev, review
 from ..config import Config
 from ..jobs import RefreshJob
 from ..pairs import remove_pairs
@@ -131,6 +131,7 @@ class Service:
             "closest": closest,
             "job": self.job.snapshot(),
             "pipeline": self.pipeline,
+            "features": {"jev": bool(jev.api_key(self.cfg))},
         }
 
     def on_sweep(self) -> None:
@@ -227,6 +228,7 @@ def create_app(svc: Service) -> Starlette:
             queries.candidates, svc.paired(), _float(request, "min_score", svc.cfg.match_min_score, 0, 2),
             qp.get("confident") == "1", qp.get("relation"), (qp.get("q") or "").strip() or None,
             int(_float(request, "offset", 0, 0, 1e9)), int(_float(request, "limit", 40, 1, 200)),
+            qp.get("view") if qp.get("view") in ("unsure", "unreviewed", "rejected") else "pending",
         )
         return JSON(data)
 

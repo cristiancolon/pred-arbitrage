@@ -1,6 +1,7 @@
 """Read-side queries for the dashboard. Each takes a short-lived SQLite connection
 (see ``store.open_db``) and returns plain JSON-able data."""
 
+import json
 import sqlite3
 import statistics
 import time
@@ -54,10 +55,15 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
     n_cand, created, confident = db.execute(
         "SELECT COUNT(*), MAX(created), COALESCE(SUM(confident), 0) FROM candidates").fetchone()
     decisions = dict(db.execute("SELECT decision, COUNT(*) FROM decisions GROUP BY decision").fetchall())
+    jev = dict(db.execute(
+        "SELECT decision = 'reject', COUNT(*) FROM decisions WHERE source = 'jev' GROUP BY 1").fetchall())
     pending = [
-        (r[0], r[1]) for r in db.execute(
-            "SELECT c.kalshi, c.pm FROM candidates c LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
+        r[2] for r in db.execute(
+            "SELECT c.kalshi, c.pm, j.verdict FROM candidates c "
+            "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
+            "LEFT JOIN jev_reviews j ON j.kalshi = c.kalshi AND j.pm = c.pm "
             "WHERE d.kalshi IS NULL")
+        if (r[0], r[1]) not in paired
     ]
     windows, profit, capital = db.execute(
         "SELECT COUNT(*), COALESCE(SUM(max_profit), 0), COALESCE(SUM(cost_at_max), 0) FROM episodes "
@@ -66,9 +72,11 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
         "catalog": {"kalshi": cat.get("K", {"count": 0, "updated": None}),
                     "pm": cat.get("P", {"count": 0, "updated": None})},
         "match": {"candidates": n_cand, "confident": confident, "updated": created},
-        "review": {"pending": sum(1 for p in pending if p not in paired),
+        "review": {"pending": len(pending),
                    "approved": decisions.get("same", 0) + decisions.get("inverse", 0),
-                   "rejected": decisions.get("reject", 0), "auto": auto},
+                   "rejected": decisions.get("reject", 0), "auto": auto,
+                   "jev": {"approved": jev.get(0, 0), "rejected": jev.get(1, 0),
+                           "unsure": pending.count("unsure"), "unreviewed": pending.count(None)}},
         "report": {"windows_24h": windows, "profit_24h": profit, "capital_24h": capital},
     }
 
@@ -141,14 +149,33 @@ def pair_detail(db: sqlite3.Connection, pair: str, hours: float) -> dict:
     }
 
 
+def _jev(row: sqlite3.Row) -> dict | None:
+    if row["verdict"] is None:
+        return None
+    return {"verdict": row["verdict"], "reason": row["reason"], "model": row["model"], "ts": row["jts"],
+            "answers": json.loads(row["answers"]) if row["answers"] else None}
+
+
 def candidates(db: sqlite3.Connection, paired: set[tuple[str, str]], min_score: float, confident: bool,
-               relation: str | None, q: str | None, offset: int, limit: int) -> dict:
-    sql = ("SELECT c.kalshi, c.pm, c.score, c.relation, c.confident FROM candidates c "
+               relation: str | None, q: str | None, offset: int, limit: int, view: str = "pending") -> dict:
+    """view: 'pending' (undecided), 'unsure' (Jev couldn't decide), 'unreviewed' (Jev
+    hasn't read it yet) or 'rejected' (Jev rejected it; approving overrides that)."""
+    sql = ("SELECT c.kalshi, c.pm, c.score, c.relation, c.confident, "
+           "j.verdict, j.reason, j.answers, j.model, j.ts AS jts FROM candidates c "
            "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
+           "LEFT JOIN jev_reviews j ON j.kalshi = c.kalshi AND j.pm = c.pm "
            "JOIN markets k ON k.venue = 'K' AND k.id = c.kalshi "
            "JOIN markets p ON p.venue = 'P' AND p.id = c.pm "
-           "WHERE d.kalshi IS NULL AND c.score >= ?")
+           "WHERE c.score >= ?")
     args: list = [min_score]
+    if view == "rejected":
+        sql += " AND d.source = 'jev' AND d.decision = 'reject'"
+    else:
+        sql += " AND d.kalshi IS NULL"
+        if view == "unsure":
+            sql += " AND j.verdict = 'unsure'"
+        elif view == "unreviewed":
+            sql += " AND j.kalshi IS NULL"
     if confident:
         sql += " AND c.confident = 1"
     if relation in ("same", "inverse"):
@@ -163,7 +190,7 @@ def candidates(db: sqlite3.Connection, paired: set[tuple[str, str]], min_score: 
     km = markets(db, "K", [r[0] for r in page], rules=True)
     pm = markets(db, "P", [r[1] for r in page], rules=True)
     items = [{"kalshi": r[0], "pm": r[1], "score": r[2], "relation": r[3], "confident": bool(r[4]),
-              "k": km.get(r[0]), "p": pm.get(r[1])} for r in page]
+              "jev": _jev(r), "k": km.get(r[0]), "p": pm.get(r[1])} for r in page]
     return {"total": len(rows), "offset": offset, "items": items}
 
 

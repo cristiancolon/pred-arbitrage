@@ -57,3 +57,20 @@ def test_shutdown_stops_a_running_stage_promptly():
     except ProcessLookupError:
         alive = False
     assert not alive
+
+
+def test_review_stage_and_retry_after_failure():
+    job = RefreshJob("/x/config.toml", 6 * 3600, None, lambda *a: None, startup_delay_s=0,
+                     stages=("catalog", "match", "review"))
+    assert job.command("review")[-3:] == ["-c", "/x/config.toml", "autoreview"]
+    assert job.snapshot()["stages"] == ["catalog", "match", "review"]
+    job.command = lambda stage: [sys.executable, "-c", "raise SystemExit(1)"]
+
+    async def main():
+        job.trigger()
+        await job._task
+
+    asyncio.run(main())
+    assert job.state == "failed"
+    # A failed run retries in 15 minutes instead of re-downloading the catalog every 30 s.
+    assert 14 * 60 < job.next_run - time.time() <= 15 * 60

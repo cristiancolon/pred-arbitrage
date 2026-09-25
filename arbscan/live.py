@@ -153,9 +153,11 @@ class LiveScanner(Scanner):
         if (km is None or km.status != "active" or kb is None or not kb.ready or pb is None or not pb.ready
                 or not pb.open or pair.id in self.finished):
             self.episodes.close_pair(pair.id, ts)
-            if self.pair_state.get(pair.id, {}).get("status") != "paused" and pair.id not in self.finished:
-                self._set_state(pair, ts, "paused", edges={},
-                                reason=self._pause_reason(km, kb, pb))
+            if pair.id not in self.finished:
+                reason = self._pause_reason(km, kb, pb)
+                st = self.pair_state.get(pair.id, {})
+                if st.get("status") != "paused" or st.get("reason") != reason:
+                    self._set_state(pair, ts, "paused", edges={}, reason=reason)
             return
 
         k_yes, k_no = kb.ladders()

@@ -203,8 +203,19 @@ page shows:
 
 | Mode | How | Staleness of a price |
 |---|---|---|
-| **Streaming** (both venues' API keys) | WebSocket order books: Kalshi `orderbook_delta` (snapshot, then sequenced deltas) and Polymarket US `MARKET_DATA` (full book and trading state per update). Each update re-prices only the pairs using that market, in well under a millisecond. | The network delay from the exchange, typically tens of ms. The dashboard shows the median delay from the exchange's timestamp to the computed edge. |
+| **Streaming** (both venues' API keys) | WebSocket order books: Kalshi `orderbook_delta` (snapshot, then sequenced deltas) and Polymarket US `MARKET_DATA` (full book and trading state per update). Each update re-prices only the pairs using that market, in tens of microseconds. | Measured on a Pi with ~4,400 pairs, from the exchange's own timestamp to the computed edge: Kalshi ~50 ms median (~55 ms p90), Polymarket US ~125 ms median (~190 ms p90). Polymarket occasionally delivers a burst of updates 1–4 s late (~1–2% of them); that delay is upstream. |
 | **Polling** (no keys) | Each sweep fetches both venues for ~100 pairs at a time, together, at 15 requests/s per venue, and walks depth for the pairs that look profitable. | ~0.5 s with a few hundred pairs, ~3 s with ~4,000. |
+
+Things learned from the live feeds that the code relies on:
+
+- Kalshi merges every orderbook subscribe on a connection into one subscription (one
+  held 6,000 markets, all snapshots in ~1 s), and its acknowledgements share the
+  sequence numbers. On a real gap the feed reconnects for fresh snapshots.
+- Polymarket US allows 10 subscriptions of 100 markets per connection, so the feed
+  opens one connection per ~1,000 markets.
+- Recordings (quotes, opportunities, per-second summaries) are written by a
+  background thread. Under streaming volume, SQLite's WAL checkpoints on the SD card
+  otherwise froze every feed for ~2 s every ~9 s.
 
 Streaming also fixes a source of phantom opportunities. When polling, two prices a
 few seconds apart can look like a 30¢ gap during a live game. Polymarket US also
@@ -227,7 +238,7 @@ the key file readable only by you.
 
 | | |
 |---|---|
-| Service (scanner + dashboard) | ~100–200 MB RAM with a few thousand pairs (streamed books are small). Runs at normal CPU priority so feed messages are handled promptly. |
+| Service (scanner + dashboard) | ~170 MB RAM and ~20% of one core while streaming ~4,400 pairs (~1,000 Kalshi and ~100 Polymarket updates a second). Runs at normal CPU priority so feed messages are handled promptly. |
 | Refresh (hourly) | A separate low-priority process for ~2 minutes (plus the Jev review, which only sends new pairs). It peaks around 200 MB during catalog and match, then exits. |
 | Limits | The systemd unit caps the whole service at 3 GB (soft limit 2 GB). |
 | Disk | Top-of-book quotes are written only when they change. Depth snapshots are stored only for profitable observations. Expect tens of MB/day for a few hundred pairs. |

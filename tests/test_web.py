@@ -131,3 +131,22 @@ def test_token_gate(env):
     assert client.get("/api/state").status_code == 401
     assert client.get("/?token=s3cret").status_code == 200  # sets the cookie
     assert client.get("/api/state").status_code == 200
+
+
+def test_paper_endpoint(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, planned_profit, "
+               "k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, unwind_loss, k_out, p_out, locked_profit, status) "
+               "VALUES ('a', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 10, 0.5, 10, 8, 8, 8, 0.1, 0.1, 0.2, 4, 4, 0, "
+               "'open')", (NOW - 60,))
+    db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_qty, p_qty, "
+               "status) VALUES ('b', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 10, 0, 0, 'missed')", (NOW - 30,))
+    db.commit()
+    client = TestClient(create_app(svc))
+    data = client.get("/api/paper?hours=1").json()
+    assert data["live"] is None  # the polling scanner doesn't paper trade
+    assert [t["id"] for t in data["trades"]] == ["b", "a"] and data["trades"][1]["k_title"] == "A vs B | A wins"
+    assert data["totals"]["sent"] == 2 and data["totals"]["missed"] == 1
+    assert data["totals"]["fill_rate"] == pytest.approx(8 / 20)
+    assert client.get("/api/state").json()["paper"] is None

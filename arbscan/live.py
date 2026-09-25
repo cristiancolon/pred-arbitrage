@@ -14,6 +14,9 @@ happen, and Polymarket US reports its trading state in every book message.
 
 Once a second the scanner commits to SQLite, writes a summary row to ``sweeps``,
 and notifies the dashboard, so neither slows the feed.
+
+With ``paper_trading`` on, every pick is also handed to the paper trader (paper.py),
+which simulates acting on it with this machine's measured order latency.
 """
 
 import asyncio
@@ -21,12 +24,15 @@ import json
 import logging
 import time
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from .arb import Leg, directions, top_edge, walk
 from .book import top_n
 from .config import Config
 from .dbwriter import DbWriter
 from .feeds import KalshiFeed, PMFeed
+from .latency import LatencyModel, LatencyProbe
+from .paper import PaperTrader
 from .pairs import Pair
 from .scanner import KALSHI_FINISHED, PMUS_DEFAULT_COEF, Episodes, Scanner
 from .venues import Kalshi, PolymarketUS
@@ -34,6 +40,7 @@ from .venues import Kalshi, PolymarketUS
 log = logging.getLogger(__name__)
 
 TICK_S = 1.0
+SETTLE_EVERY_S = 60.0  # how often paper positions check for published results
 OPPORTUNITY_EVERY_S = 1.0  # at most one stored depth snapshot per pair/direction per second
 LIFECYCLE_STATUS = {"deactivated": "inactive", "activated": "active", "determined": "determined",
                     "settled": "settled"}
@@ -58,7 +65,15 @@ class LiveScanner(Scanner):
         self.last_opp: dict[tuple[str, str], float] = {}
         self._errors_seen = 0
         self._meta_pending = False  # pairs changed while a metadata refresh was running
+        self.latency = LatencyModel(self._feed_lags)
+        self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta)
+                      if cfg.paper_trading else None)
         self._reset_window()
+
+    def _feed_lags(self, venue: str):
+        if venue == "K":
+            return self.kfeed.stats.lags
+        return [x for c in self.pfeed.conns for x in c.stats.lags]
 
     # --- bookkeeping ------------------------------------------------------------
 
@@ -193,6 +208,10 @@ class LiveScanner(Scanner):
                      days, json.dumps(top_n(kl, n)), json.dumps(top_n(pl, n))),
                 )
             self.episodes.observe(key, ts, res, days)
+            if self.paper is not None and res.positive:
+                ep = self.episodes.open.get(key)
+                self.paper.consider(pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days,
+                                    ep.start_ts if ep else ts, max(kb.recv_ts, pb.recv_ts))
 
         p_bid = round(1 - p_no[0][0], 4) if p_no else None
         p_ask = p_yes[0][0] if p_yes else None
@@ -258,6 +277,24 @@ class LiveScanner(Scanner):
         finally:
             self._meta_task = None
 
+    def _probe_slug(self) -> str | None:
+        """An open Polymarket US market to preview orders on (for the latency probe)."""
+        for slug, book in self.pfeed.books.items():
+            if book.ready and book.open:
+                return slug
+        return None
+
+    async def _settle_loop(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=SETTLE_EVERY_S)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self.paper.settle(self.kalshi, self.pm, self.finished)
+            except Exception as e:
+                log.warning("paper settlement check failed: %s", e)
+
     def feed_state(self) -> dict:
         return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}
 
@@ -266,6 +303,13 @@ class LiveScanner(Scanner):
         self.pairs.refresh()
         self._reindex()
         tasks = [asyncio.create_task(self.kfeed.run(stop)), asyncio.create_task(self.pfeed.run(stop))]
+        if self.paper is not None:
+            # Orders go to the same host as the authenticated feed (api.polymarket.us).
+            pm_api = "https://" + urlparse(self.cfg.pmus_ws_url).netloc
+            probe = LatencyProbe(self.latency, self.cfg.kalshi_base, self.kfeed.signer, pm_api, self.pfeed.signer,
+                                 self._probe_slug, self.cfg.latency_probe_s)
+            tasks.append(asyncio.create_task(probe.run(stop)))
+            tasks.append(asyncio.create_task(self._settle_loop(stop)))
         try:
             await self.refresh_meta(force=True)
         except Exception as e:

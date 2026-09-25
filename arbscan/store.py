@@ -134,6 +134,47 @@ CREATE TABLE IF NOT EXISTS sweeps (
     best_dir TEXT
 );
 CREATE INDEX IF NOT EXISTS sweeps_ts ON sweeps (ts);
+
+-- Simulated trades (paper.py): both legs filled against the live books as they stood
+-- when the orders would have reached each exchange. Nothing here was really traded.
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id TEXT PRIMARY KEY,
+    ts REAL NOT NULL,               -- when the pick was seen and the orders "sent"
+    pair TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    k_side TEXT NOT NULL,           -- yes | no bought on Kalshi
+    p_side TEXT NOT NULL,           -- yes | no bought on Polymarket US
+    planned_size INTEGER,           -- contract pairs the book showed when deciding
+    planned_edge REAL,
+    planned_profit REAL,
+    planned_cost REAL,
+    k_limit REAL,                   -- limit prices sent (IOC)
+    p_limit REAL,
+    k_delay_ms REAL,                -- decision -> order at the exchange, as simulated
+    p_delay_ms REAL,
+    k_qty REAL,                     -- contracts bought (entry plus any chase)
+    p_qty REAL,
+    k_fees REAL,
+    p_fees REAL,
+    unwind_venue TEXT,              -- venue where an unhedged remainder was sold back
+    unwind_qty REAL,
+    unwind_loss REAL,
+    k_hold REAL,                    -- contracts held to settlement
+    p_hold REAL,
+    k_out REAL,                     -- net cash spent on each venue (fees included)
+    p_out REAL,
+    locked_profit REAL,             -- min(k_hold, p_hold) - k_out - p_out: profit if both settle as one bet
+    days REAL,
+    resolve_ts REAL,                -- expected resolution
+    status TEXT NOT NULL,           -- open | settled | missed
+    settled_ts REAL,
+    payout_k REAL,
+    payout_p REAL,
+    pnl REAL,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS paper_ts ON paper_trades (ts);
+CREATE INDEX IF NOT EXISTS paper_status ON paper_trades (status);
 """
 
 

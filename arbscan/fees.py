@@ -1,9 +1,12 @@
 """Taker fee models for both venues.
 
 Both venues charge ``coef * contracts * p * (1 - p)`` to takers, where ``p`` is the
-trade price in dollars. Rounding is ignored: Kalshi aligns direct-member balances to
-$0.0001 and Polymarket US to whole cents, both negligible at the sizes we care about.
+trade price in dollars. Scanning ignores rounding; paper trading (``order_fee``)
+rounds each order's fee up: Kalshi aligns direct-member balances to $0.0001 and
+Polymarket US to whole cents, which matters for orders of a few contracts.
 """
+
+import math
 
 KALSHI_BASE_TAKER_COEF = 0.07
 
@@ -26,3 +29,14 @@ def kalshi_taker_coef(fee_type: str | None, multiplier: float | None) -> float:
 def per_contract(coef: float, price: float) -> float:
     """Fee in dollars for one contract traded at ``price``."""
     return coef * price * (1.0 - price)
+
+
+FEE_TICK = {"K": 0.0001, "P": 0.01}
+
+
+def order_fee(venue: str, coef: float, fills) -> float:
+    """Taker fee for one order filled at ``fills`` [(price, contracts)], rounded up to
+    the venue's balance precision."""
+    raw = sum(q * per_contract(coef, p) for p, q in fills)
+    tick = FEE_TICK[venue]
+    return math.ceil(raw / tick - 1e-9) * tick

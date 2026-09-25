@@ -430,3 +430,6 @@ table.data td.market .pair-name { min-width: 180px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.tile-link { display: contents; color: inherit; text-decoration: none; }
+.tile-link:hover .tile { border-color: var(--border-strong); }

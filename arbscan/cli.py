@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from . import catalog, config, discover, jev, match, report, review, scanner, store
+from . import catalog, config, discover, jev, match, report, rescale, review, scanner, store
 
 
 def _run(coro):
@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     sv.add_argument("--host", help="dashboard bind address (default from config: 0.0.0.0)")
     sv.add_argument("--port", type=int, help="dashboard port (default from config: 8787)")
     sv.add_argument("--no-scanner", action="store_true", help="dashboard and refresh job only")
+    sub.add_parser("rescale", help="re-size recorded opportunities for the configured bankroll")
     rp = sub.add_parser("report", help="summarize what the scanner found")
     rp.add_argument("--hours", type=float, default=24.0)
     rp.add_argument("--min-profit", type=float, default=0.0, help="ignore windows below this $ profit")
@@ -70,7 +71,10 @@ def main(argv: list[str] | None = None) -> None:
         elif args.cmd == "autoreview":
             asyncio.run(jev.review(cfg, db, limit=args.limit, dry_run=args.dry_run))
         elif args.cmd == "scan":
+            rescale.ensure(cfg, db)
             _run(scanner.run(cfg, db, once=args.once))
+        elif args.cmd == "rescale":
+            rescale.rescale(cfg, db)
         elif args.cmd == "serve":
             from dataclasses import replace
 
@@ -79,7 +83,9 @@ def main(argv: list[str] | None = None) -> None:
             cfg = replace(cfg, web_host=args.host or cfg.web_host, web_port=args.port or cfg.web_port)
             _run(serve(cfg, args.config, db, run_scanner=not args.no_scanner))
         elif args.cmd == "report":
-            report.run(db, args.hours, args.min_profit, args.top)
+            report.run(db, args.hours, args.min_profit, args.top,
+                       {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
+                        "min_annualized": cfg.sim_min_annualized_return})
     except KeyboardInterrupt:
         pass
     finally:

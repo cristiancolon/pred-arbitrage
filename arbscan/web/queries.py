@@ -6,6 +6,8 @@ import sqlite3
 import statistics
 import time
 
+from .. import bankroll
+
 MARKET_FIELDS = ("id", "event_id", "series", "category", "title", "yes_label", "no_label", "market_type",
                  "start_ts", "close_ts", "fee_coef", "yes_bid", "yes_ask")
 DURATION_BUCKETS = [(0, 5, "<5s"), (5, 15, "5-15s"), (15, 60, "15-60s"), (60, 300, "1-5m"),
@@ -93,7 +95,8 @@ def _bucket(hours: float, points: int) -> float:
     return max(3.0, hours * 3600 / points)
 
 
-def overview(db: sqlite3.Connection, hours: float) -> dict:
+def overview(db: sqlite3.Connection, hours: float, sim: dict | None = None) -> dict:
+    """``sim``: bankroll simulation settings (bankroll, min_window_s, min_annualized)."""
     now = time.time()
     since = now - hours * 3600
     b = _bucket(hours, 360)
@@ -112,16 +115,20 @@ def overview(db: sqlite3.Connection, hours: float) -> dict:
     start = since - (since % pb)
     n = int((now - start) // pb) + 1
     buckets = [{"ts": start + i * pb, "windows": 0, "profit": 0.0, "capital": 0.0} for i in range(n)]
-    eps = db.execute("SELECT start_ts, end_ts, max_profit, cost_at_max, max_top_edge FROM episodes "
-                     "WHERE start_ts >= ?", (since,)).fetchall()
+    eps = db.execute("SELECT start_ts, end_ts, max_profit, cost_at_max, max_top_edge, days_to_resolve "
+                     "FROM episodes WHERE start_ts >= ?", (since,)).fetchall()
     for e in eps:
         i = min(n - 1, int((e[0] - start) // pb))
         buckets[i]["windows"] += 1
         buckets[i]["profit"] += e[2] or 0
         buckets[i]["capital"] += e[3] or 0
     durations = [e[1] - e[0] for e in eps]
+    simulated = None
+    if sim and sim.get("bankroll"):
+        simulated = bankroll.simulate([dict(e) for e in eps], sim["bankroll"], sim["min_window_s"],
+                                      sim["min_annualized"])
     return {
-        "hours": hours, "since": since, "bucket_s": b, "profit_bucket_s": pb,
+        "hours": hours, "since": since, "bucket_s": b, "profit_bucket_s": pb, "sim": simulated,
         "edge": edge, "latency": latency,
         "profit": buckets,
         "kpi": {

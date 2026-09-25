@@ -141,6 +141,7 @@ class Service:
             "discovery": self.discovery.snapshot() if self.discovery else None,
             "pipeline": self.pipeline,
             "features": {"jev": bool(jev.api_key(self.cfg))},
+            "bankroll": self.cfg.bankroll_usd,
         }
 
     def on_sweep(self) -> None:
@@ -199,7 +200,10 @@ def create_app(svc: Service) -> Starlette:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     async def overview(request: Request) -> Response:
-        return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90)))
+        cfg = svc.cfg
+        sim = {"bankroll": cfg.bankroll_usd, "min_window_s": cfg.sim_min_window_s,
+               "min_annualized": cfg.sim_min_annualized_return}
+        return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90), sim))
 
     async def pairs(_: Request) -> Response:
         sc = svc.scanner

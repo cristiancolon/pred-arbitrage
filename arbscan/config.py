@@ -48,6 +48,14 @@ class Config:
     depth_trigger_edge: float = 0.0
     # Only take contract pairs whose marginal profit after fees exceeds this ($).
     min_edge: float = 0.0
+    # Your total bankroll ($), held half on each venue since each leg is paid for there.
+    # Every window is sized to what that buys; 0 means unlimited (full book depth).
+    bankroll_usd: float = 500.0
+    # The dashboard's bankroll simulation takes windows in the order they appeared,
+    # skipping ones open less than this long or returning less than this per year,
+    # and keeps the money tied up until the market resolves.
+    sim_min_window_s: float = 1.0
+    sim_min_annualized_return: float = 0.10
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10
@@ -76,6 +84,11 @@ class Config:
     jev_model: str = "jev-1.13.0"
     jev_rps: float = 8.0
     jev_max_per_run: int = 10000
+
+    @property
+    def leg_budget(self) -> float | None:
+        """Cash available per venue, for sizing each leg."""
+        return self.bankroll_usd / 2 if self.bankroll_usd > 0 else None
 
     @property
     def can_stream(self) -> bool:

@@ -361,7 +361,8 @@ class Scanner:
                 continue  # not fetched this sweep; keep any open episode as-is
             p_yes, p_no = books[j.pair.pm]
             p_ladder = p_yes if j.pm_side == "yes" else p_no
-            res = walk(Leg(j.k_ladder, j.k_coef), Leg(p_ladder, j.p_coef), self.cfg.min_edge)
+            res = walk(Leg(j.k_ladder, j.k_coef), Leg(p_ladder, j.p_coef), self.cfg.min_edge,
+                       budget_a=self.cfg.leg_budget, budget_b=self.cfg.leg_budget)
             if res.positive:
                 n = self.cfg.book_levels_stored
                 self.db.execute(

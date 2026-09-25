@@ -119,3 +119,13 @@ def test_directions():
     assert directions("inverse")[0][1:] == ("yes", "yes")
     with pytest.raises(KeyError):
         directions("sideways")
+
+
+def test_walk_stops_at_each_venues_budget():
+    # Deep books, 10c edge before fees: the cash on each venue is the limit.
+    a, b = Leg([(0.40, 10_000)], 0.0), Leg([(0.50, 10_000)], 0.0)
+    res = walk(a, b, budget_a=100.0, budget_b=100.0)
+    assert res.size == 200  # $100 buys 250 at 40c but only 200 at 50c
+    assert res.cost == pytest.approx(200 * 0.90) and res.profit == pytest.approx(20.0)
+    with_fees = walk(Leg([(0.40, 10_000)], 0.07), Leg([(0.50, 10_000)], 0.0695), budget_a=100.0, budget_b=100.0)
+    assert with_fees.size == 193  # 50c + 1.74c fee per contract

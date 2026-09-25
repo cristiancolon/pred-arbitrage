@@ -62,79 +62,86 @@ async def _wait(cond, timeout=5.0):
 
 
 class FakeKalshiServer:
-    """Speaks enough of Kalshi's WS protocol: subscribe/unsubscribe, snapshots, deltas."""
+    """Speaks Kalshi's WS protocol as observed in production: the first orderbook
+    subscribe creates a subscription, later ones are merged into it and acknowledged
+    with ``ok`` (listing every market), and all of those messages share one sequence."""
 
-    def __init__(self, max_markets=1000):
-        self.max_markets = max_markets
+    def __init__(self):
         self.commands: list[dict] = []
         self.conns = []
         self.headers = None
-        self.next_sid = 1
-        self.seq: dict[int, int] = {}
-        self.sid_of: dict[str, int] = {}
 
     async def handler(self, ws):
         self.headers = ws.request.headers
         self.conns.append(ws)
+        state = {"sid": None, "seq": 0, "markets": []}
+        ws.state_ = state
         async for raw in ws:
             cmd = json.loads(raw)
             self.commands.append(cmd)
             params = cmd.get("params") or {}
-            if cmd["cmd"] == "subscribe":
-                tickers = params.get("market_tickers") or []
-                if len(tickers) > self.max_markets:
-                    await ws.send(json.dumps({"id": cmd["id"], "type": "error", "msg": {"code": 26, "msg": "limit"}}))
-                    continue
-                sid = self.next_sid
-                self.next_sid += 1
+            if cmd["cmd"] == "subscribe" and params["channels"] == ["market_lifecycle_v2"]:
                 await ws.send(json.dumps({"id": cmd["id"], "type": "subscribed",
-                                          "msg": {"channel": params["channels"][0], "sid": sid}}))
+                                          "msg": {"channel": "market_lifecycle_v2", "sid": 99}}))
+            elif cmd["cmd"] == "subscribe":
+                tickers = params["market_tickers"]
+                state["markets"] += tickers
+                if state["sid"] is None:
+                    state["sid"] = 1
+                    await ws.send(json.dumps({"id": cmd["id"], "type": "subscribed",
+                                              "msg": {"channel": "orderbook_delta", "sid": 1}}))
+                else:
+                    await self.send(ws, "ok", {"market_tickers": state["markets"]}, cid=cmd["id"])
                 for t in tickers:
-                    self.sid_of[t] = sid
-                    await self.send(ws, sid, "orderbook_snapshot",
-                                    {"market_ticker": t, "yes_dollars_fp": [["0.3500", "100"]],
-                                     "no_dollars_fp": [["0.6000", "20"]]})
+                    await self.send(ws, "orderbook_snapshot", {"market_ticker": t, "yes_dollars_fp": [["0.3500", "100"]],
+                                                               "no_dollars_fp": [["0.6000", "20"]]})
+            elif cmd["cmd"] == "update_subscription" and params.get("action") == "delete_markets":
+                state["markets"] = [t for t in state["markets"] if t not in params["market_tickers"]]
+                await self.send(ws, "ok", {"market_tickers": state["markets"]}, cid=cmd["id"])
 
-    async def send(self, ws, sid, kind, msg, seq=None):
-        self.seq[sid] = seq if seq is not None else self.seq.get(sid, 0) + 1
-        await ws.send(json.dumps({"type": kind, "sid": sid, "seq": self.seq[sid], "msg": msg}))
+    async def send(self, ws, kind, msg, cid=None, skip=0):
+        st = ws.state_
+        st["seq"] += 1 + skip
+        out = {"type": kind, "sid": st["sid"], "seq": st["seq"], "msg": msg}
+        if cid is not None:
+            out["id"] = cid
+        await ws.send(json.dumps(out))
 
 
-def test_kalshi_feed_snapshot_delta_gap_and_split():
-    server = FakeKalshiServer(max_markets=2)
+def test_kalshi_feed_merged_subscription_gap_and_delete():
+    server = FakeKalshiServer()
     updates = []
 
     async def main():
         async with serve(server.handler, "127.0.0.1", 0) as srv:
             port = srv.sockets[0].getsockname()[1]
             feed = KalshiFeed(f"ws://127.0.0.1:{port}", KalshiSigner("kid", rsa_pem()), updates.append, lambda m: None)
-            feed.set_markets(["A", "B", "C", "D"])
+            feed.CHUNK = 2  # several subscribes, merged by the server; their acks take sequence numbers
+            feed.set_markets(["A", "B", "C", "D", "E"])
             stop = asyncio.Event()
             task = asyncio.create_task(feed.run(stop))
-            # 4 markets exceed the fake's per-subscription limit of 2: the feed splits.
-            await _wait(lambda: all(t in feed.books and feed.books[t].ready for t in "ABCD"))
+            await _wait(lambda: all(t in feed.books and feed.books[t].ready for t in "ABCDE"))
             assert server.headers["KALSHI-ACCESS-KEY"] == "kid"
             assert feed.books["A"].ladders()[0] == [(0.4, 20.0)]
+            assert feed.stats.reconnects == 0  # acks in the sequence are not gaps
 
-            ws, sid = server.conns[-1], server.sid_of["A"]
-            await server.send(ws, sid, "orderbook_delta",
-                              {"market_ticker": "A", "price_dollars": "0.6000", "delta_fp": "-20", "side": "no",
-                               "ts_ms": int(time.time() * 1000)})
+            ws = server.conns[-1]
+            await server.send(ws, "orderbook_delta", {"market_ticker": "A", "price_dollars": "0.6000", "delta_fp": "-20",
+                                                      "side": "no", "ts_ms": int(time.time() * 1000)})
             await _wait(lambda: feed.books["A"].ladders()[0] == [])
             assert feed.stats.lags
 
-            # A skipped sequence number means a lost message: resubscribe for fresh books.
-            n = len(server.commands)
-            await server.send(ws, sid, "orderbook_delta",
-                              {"market_ticker": "A", "price_dollars": "0.5000", "delta_fp": "5", "side": "no"},
-                              seq=server.seq[sid] + 5)
-            await _wait(lambda: any(c["cmd"] == "unsubscribe" for c in server.commands[n:]))
-            await _wait(lambda: feed.books["A"].ready and feed.books["A"].ladders()[0] == [(0.4, 20.0)])
-
-            # Dropping a market removes it from its subscription.
-            feed.set_markets(["A", "B", "C"])
+            # Dropping a market removes it from the subscription.
+            feed.set_markets(["A", "B", "C", "D"])
             await _wait(lambda: any(c.get("params", {}).get("action") == "delete_markets" for c in server.commands))
-            assert "D" not in feed.books
+            assert "E" not in feed.books
+
+            # A skipped sequence number means a lost message: reconnect for fresh books.
+            await server.send(ws, "orderbook_delta", {"market_ticker": "A", "price_dollars": "0.5000", "delta_fp": "5",
+                                                      "side": "no"}, skip=3)
+            await _wait(lambda: len(server.conns) == 2)
+            await _wait(lambda: all(feed.books[t].ready for t in "ABCD") and feed.books["A"].ladders()[0] == [(0.4, 20.0)])
+            assert feed.stats.reconnects == 1
             stop.set()
             await task
 

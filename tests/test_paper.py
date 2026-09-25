@@ -101,16 +101,10 @@ def test_both_legs_fill_and_settle(tmp_path):
     assert t["locked_profit"] == pytest.approx(100 - 45 - 50 - t["k_fees"] - t["p_fees"])
     assert h.trader.cash["K"] == pytest.approx(150 - t["k_out"])
 
-    class Venue:
-        def __init__(self, markets):
-            self.m = markets
-
-        async def markets(self, ids):
-            return {i: self.m[i] for i in ids if i in self.m}
-
-    kalshi = Venue({"K-1": {"status": "finalized", "result": "no"}})
-    pm = Venue({"p-1": {"status": "MARKET_STATUS_RESOLVED", "outcomePrices": '["0","1"]'}})
-    assert asyncio.run(h.trader.settle(kalshi, pm, {PAIR.id})) == 1
+    results = {("K", "K-1"): 0.0, ("P", "p-1"): 0.0}  # both markets settled NO
+    lookup = lambda keys: {k: results[k] for k in keys if k in results}  # noqa: E731
+    assert h.trader.settle(lambda keys: {}, {PAIR.id}) == 0  # no results yet
+    assert h.trader.settle(lookup, {PAIR.id}) == 1
     row = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
     # Kalshi YES lost, Polymarket NO won: $100 lands on Polymarket.
     assert (row["status"], row["payout_k"], row["payout_p"]) == ("settled", 0.0, 100.0)
@@ -186,13 +180,6 @@ def test_bankroll_change_moves_cash(tmp_path):
     assert t.cash == {"K": 200, "P": 200}
     assert json.loads(h.db.execute("SELECT value FROM settings WHERE key = 'paper_deposits'").fetchone()[0]) == \
         {"K": 200, "P": 200}
-
-
-def test_results():
-    assert paper.kalshi_yes_value({"status": "finalized", "result": "yes"}) == 1.0
-    assert paper.kalshi_yes_value({"status": "active", "result": ""}) is None
-    assert paper.pm_yes_value({"status": "MARKET_STATUS_RESOLVED", "outcomePrices": '["1","0"]'}) == 1.0
-    assert paper.pm_yes_value({"status": "MARKET_STATUS_OPEN"}) is None
 
 
 def test_probe_never_touches_the_order_endpoint():

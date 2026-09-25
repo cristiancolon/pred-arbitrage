@@ -33,6 +33,7 @@ from .dbwriter import DbWriter
 from .feeds import KalshiFeed, PMFeed
 from .latency import LatencyModel, LatencyProbe
 from .paper import PaperTrader
+from .results import UPSERT, kalshi_lifecycle_row, lookup
 from .pairs import Pair
 from .scanner import KALSHI_FINISHED, PMUS_DEFAULT_COEF, Episodes, Scanner
 from .venues import Kalshi, PolymarketUS
@@ -54,7 +55,7 @@ class LiveScanner(Scanner):
         # Recordings go through a writer thread so SQLite never blocks the feeds;
         # ``db`` stays for reads.
         self.out = DbWriter(cfg.db_path)
-        self.episodes = Episodes(self.out)
+        self.episodes = Episodes(self.out, reader=db)
         self.kfeed, self.pfeed = kfeed, pfeed
         kfeed.on_update, kfeed.on_lifecycle, pfeed.on_update = self._on_kalshi, self._on_lifecycle, self._on_pm
         self.by_ticker: dict[str, list[Pair]] = defaultdict(list)
@@ -153,6 +154,9 @@ class LiveScanner(Scanner):
 
     def _on_lifecycle(self, msg: dict) -> None:
         t = msg.get("market_ticker")
+        row = kalshi_lifecycle_row(msg, time.time())
+        if row is not None:  # a result, for judging trades later (results.py)
+            self.out.execute(UPSERT, row)
         km = self.kmeta.get(t)
         if km is None:
             return
@@ -291,7 +295,7 @@ class LiveScanner(Scanner):
             except asyncio.TimeoutError:
                 pass
             try:
-                await self.paper.settle(self.kalshi, self.pm, self.finished)
+                self.paper.settle(lambda keys: lookup(self.db, keys), self.finished)
             except Exception as e:
                 log.warning("paper settlement check failed: %s", e)
 

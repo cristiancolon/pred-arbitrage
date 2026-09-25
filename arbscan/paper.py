@@ -14,8 +14,8 @@ replaced by real latency here), the paper trader acts on it like a live bot woul
    The bot first tries to buy the missing leg at up to break-even, then sells any
    remainder back (buys the opposite side on the same venue, which nets out).
 4. Positions are held until both markets resolve; each venue then pays $1 per
-   winning contract into its own cash, using the venues' published results, so a
-   pair that wasn't really the same bet shows up as a loss.
+   winning contract into its own cash, using the venues' published results
+   (results.py), so a pair that wasn't really the same bet shows up as a loss.
 
 Costs: taker fees per order, rounded up to each venue's balance precision
 (fees.order_fee), slippage from walking the book, anything lost unwinding a leg,
@@ -42,7 +42,6 @@ log = logging.getLogger(__name__)
 SHADOW_S = 120.0
 SETTLE_GRACE_S = 3600.0  # look for results this long after the expected resolution
 EPS = 1e-9
-KALSHI_DONE = {"determined", "settled", "finalized"}
 VENUES = ("K", "P")
 
 
@@ -354,20 +353,19 @@ class PaperTrader:
 
     # --- settling -----------------------------------------------------------------------
 
-    async def settle(self, kalshi, pm, finished: set[str]) -> int:
-        """Pay out positions whose markets have published results. Returns how many."""
+    def settle(self, lookup, finished: set[str]) -> int:
+        """Pay out positions whose markets both have results (results.py records them).
+        ``lookup(keys)`` gives what one YES contract paid per (venue, id). Returns how many."""
         now = time.time()
         due = [t for t in self.open.values()
                if t["pair"] in finished or (t["resolve_ts"] or now) + SETTLE_GRACE_S <= now]
         if not due:
             return 0
-        tickers = sorted({t["pair"].split("|", 1)[0] for t in due})
-        slugs = sorted({t["pair"].split("|", 1)[1] for t in due})
-        km, pmk = await kalshi.markets(tickers), await pm.markets(slugs)
+        values = lookup({(v, m) for t in due for v, m in zip(VENUES, t["pair"].split("|", 1))})
         n = 0
         for t in due:
             k, p = t["pair"].split("|", 1)
-            yk, yp = kalshi_yes_value(km.get(k)), pm_yes_value(pmk.get(p))
+            yk, yp = values.get(("K", k)), values.get(("P", p))
             if yk is None or yp is None:
                 continue
             pay_k = t["k_hold"] * (yk if t["k_side"] == "yes" else 1 - yk)
@@ -392,22 +390,3 @@ class PaperTrader:
                 "open": len(self.open), "locked": locked, "realized": self.realized, "in_flight": len(self.busy),
                 "stats": dict(self.stats), "latency": self.latency.snapshot()}
 
-
-def kalshi_yes_value(m: dict | None) -> float | None:
-    """What one YES contract paid, once Kalshi has a result."""
-    if not m or m.get("status") not in KALSHI_DONE:
-        return None
-    v = m.get("settlement_value_dollars")
-    if v not in (None, ""):
-        return float(v)
-    return {"yes": 1.0, "no": 0.0}.get(m.get("result") or "")
-
-
-def pm_yes_value(m: dict | None) -> float | None:
-    """What one YES (long) contract paid, once Polymarket US has resolved the market."""
-    if not m or m.get("status") != "MARKET_STATUS_RESOLVED":
-        return None
-    try:
-        return float(json.loads(m.get("outcomePrices") or "[]")[0])
-    except (ValueError, IndexError, TypeError):
-        return None

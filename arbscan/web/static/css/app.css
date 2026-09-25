@@ -387,6 +387,8 @@ table.data td.market .pair-name { min-width: 180px; }
 .score .track { width: 38px; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
 .score .track i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .q-item .row1 .spacer { flex: 1; }
+.jev-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.jev-facts b { color: var(--text-1); font-weight: 650; }
 
 .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 1100px) { .review { grid-template-columns: 1fr; } .queue { position: static; max-height: 420px; } }

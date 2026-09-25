@@ -36,9 +36,11 @@ export function Pipeline() {
   const fresh = last && now - last.ts < Math.max(15, sc.poll_interval_s * 4);
   const refresh = async () => {
     const r = await api("/api/jobs/refresh", { method: "POST" });
-    toast(r.started ? "Refresh started: catalog, then match" : "A refresh is already running");
+    toast(r.started ? `Refresh started: ${(job?.stages || ["catalog", "match"]).join(", then ")}` : "A refresh is already running");
   };
   const rev = p.review || {};
+  const jevOn = s.features?.jev;
+  const jv = rev.jev || {};
   const rep = p.report || {};
   const openNow = (s.open || []).length;
   const stageRunning = (name) => running && job.stage === name;
@@ -56,14 +58,17 @@ export function Pipeline() {
       foot=${stageRunning("match")
         ? html`<${Status} tone="accent" pulse>Matching · ${duration(now - job.stage_started)}<//>`
         : html`<${Status} tone=${p.match?.updated ? "good" : ""}>Updated ${ago(p.match?.updated, now)}<//>`} />
-    <${Stage} icon="review" name="Review" active=${rev.pending > 0}
+    <${Stage} icon="review" name="Review" active=${stageRunning("review") || (!jevOn && rev.pending > 0)} progress=${stageRunning("review")}
       action=${html`<a class="btn ghost sm" href="#/review">Open<${Icon} name="arrow" size=${13} /></a>`}
-      value=${int(rev.pending)} sub="awaiting your review"
-      foot=${html`<span class="muted" style="font-size:12px">${int(rev.approved)} approved (${int(rev.auto)} auto) · ${int(rev.rejected)} rejected</span>`} />
+      value=${int(rev.pending)}
+      sub=${jevOn ? `pending · ${int(jv.unsure)} Jev unsure · ${int(jv.unreviewed)} not read yet` : "awaiting your review"}
+      foot=${stageRunning("review")
+        ? html`<${Status} tone="accent" pulse>Jev reviewing · ${duration(now - job.stage_started)}<//>`
+        : html`<span class="muted" style="font-size:12px">${int(rev.approved)} approved (${int(rev.auto)} by rules${jevOn ? `, ${int(jv.approved)} by Jev` : ""}) · ${int(rev.rejected)} rejected</span>`} />
     <${Stage} icon="radar" name="Scan" active=${fresh && sc.pairs.total > 0}
       value=${html`${int(sc.pairs.live)}<span class="muted" style="font-size:15px;font-weight:500"> / ${int(sc.pairs.total)}</span>`}
       sub=${`pairs live${sc.pairs.finished ? ` · ${sc.pairs.finished} finished` : ""}${sc.pairs.paused ? ` · ${sc.pairs.paused} paused` : ""}`}
-      foot=${sc.pairs.total === 0 ? html`<${Status}>Idle until you approve pairs<//>`
+      foot=${sc.pairs.total === 0 ? html`<${Status}>Idle until pairs are approved<//>`
         : fresh ? html`<${Status} tone="good" pulse>Sweeping every ${sc.poll_interval_s}s · ${(last.dur_ms / 1000).toFixed(1)}s each<//>`
         : html`<${Status} tone="warning">Last sweep ${ago(last?.ts, now)}<//>`} />
     <${Stage} icon="chart" name="Report" active=${openNow > 0}

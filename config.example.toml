@@ -1,4 +1,6 @@
 # Copy to config.toml and edit. Every key is optional; these are the defaults.
+# Plain keys must come before the first [[auto_approve]] table: TOML puts any key
+# written after a table header inside that table.
 
 db_path = "data/arbscan.db"
 pairs_path = "pairs.csv"
@@ -26,13 +28,22 @@ web_host = "0.0.0.0"
 web_port = 8787
 web_token = ""
 
-# How often `arbscan serve` re-downloads the catalog and re-runs matching.
-refresh_interval_h = 6.0
+# How often `arbscan serve` re-downloads the catalog, re-runs matching and (with a
+# Jev key) reviews new suggestions. A refresh takes ~2 minutes at low priority.
+refresh_interval_h = 1.0
 
 # Catalog/matching: ignore markets resolving further out than this, and
 # suggestions scoring below this.
 catalog_horizon_days = 120
 match_min_score = 0.45
+
+# Automatic review with TypeSafe's Jev model (see README). Set a key to turn it on;
+# TYPESAFE_API_KEY in the environment also works. Keep this file private
+# (chmod 600): it is git-ignored.
+# jev_api_key = "apikey_..."
+# jev_model = "jev-1.13.0"     # the thresholds in arbscan/jev.py were tuned on this version
+# jev_rps = 8.0                # the API allows 1,200 requests/minute
+# jev_max_per_run = 10000      # a cap on requests per refresh, as a cost guard
 
 # Auto-approve rules: for templated markets whose rulebooks you've compared once
 # by hand, approve every confident, mutual-best match between a Kalshi series and a

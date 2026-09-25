@@ -1,4 +1,5 @@
-"""The background refresh job: ``catalog`` then ``match``, on a schedule or on demand.
+"""The background refresh job: ``catalog``, ``match`` and (with a Jev API key)
+``review``, on a schedule or on demand.
 
 Each stage runs as a niced subprocess so the scanner's event loop stays responsive
 and the catalog's memory is returned to the OS when it finishes.
@@ -16,6 +17,10 @@ from collections.abc import Callable
 log = logging.getLogger(__name__)
 
 STAGES = ("catalog", "match")
+# Stage name -> `arbscan` subcommand.
+COMMANDS = {"catalog": "catalog", "match": "match", "review": "autoreview"}
+# After a failed run, try again this much later (or one interval, if shorter).
+RETRY_AFTER_S = 15 * 60
 # "2026-09-24 01:40:42,185 INFO arbscan.catalog: msg" -> "msg" ("WARNING: msg" for other levels)
 _LOG_PREFIX = re.compile(r"^\S+ \S+ (DEBUG|INFO|WARNING|ERROR|CRITICAL) [\w.]+: ")
 
@@ -26,9 +31,11 @@ def _keep_level(m: re.Match) -> str:
 
 class RefreshJob:
     def __init__(self, config_path: str | None, interval_s: float, last_catalog_ts: float | None,
-                 notify: Callable[[str, dict], None], startup_delay_s: float = 10.0):
+                 notify: Callable[[str, dict], None], startup_delay_s: float = 10.0,
+                 stages: tuple[str, ...] = STAGES):
         self.config_path = config_path
         self.interval_s = interval_s
+        self.stages = stages
         self.startup_delay_s = startup_delay_s
         self.notify = notify
         self.state = "idle"  # idle | running | ok | failed
@@ -54,7 +61,7 @@ class RefreshJob:
             "state": self.state, "stage": self.stage, "stage_started": self.stage_started,
             "started": self.started, "finished": self.finished, "last_ok": self.last_ok,
             "error": self.error, "next_run": self.next_run, "interval_s": self.interval_s,
-            "stages": list(STAGES), "history": list(self.history),
+            "stages": list(self.stages), "history": list(self.history),
         }
 
     def trigger(self) -> bool:
@@ -67,7 +74,7 @@ class RefreshJob:
         args = [sys.executable, "-m", "arbscan"]
         if self.config_path:
             args += ["-c", self.config_path]
-        return args + [stage]
+        return args + [COMMANDS[stage]]
 
     def _line(self, text: str, stage: str | None) -> None:
         entry = {"ts": time.time(), "stage": stage, "text": text}
@@ -82,7 +89,7 @@ class RefreshJob:
         self._line("refresh started", None)
         timings: dict[str, float] = {}
         ok = True
-        for stage in STAGES:
+        for stage in self.stages:
             self.stage, self.stage_started = stage, time.time()
             self._changed()
             try:
@@ -114,10 +121,13 @@ class RefreshJob:
             self._line(f"refresh finished in {self.finished - self.started:.0f}s", None)
         self.history.appendleft({"started": self.started, "finished": self.finished, "ok": ok,
                                  "timings": timings, "error": self.error})
-        self._schedule_next()
+        self._schedule_next(failed=not ok)
         self._changed()
 
-    def _schedule_next(self) -> None:
+    def _schedule_next(self, failed: bool = False) -> None:
+        if failed:
+            self.next_run = time.time() + min(RETRY_AFTER_S, self.interval_s)
+            return
         base = self.last_ok or 0.0
         self.next_run = max(time.time() + 30, base + self.interval_s)
 

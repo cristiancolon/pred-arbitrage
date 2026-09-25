@@ -57,15 +57,24 @@ def _market_block(style: _Style, venue: str, m: sqlite3.Row, width: int) -> list
     return lines
 
 
-def decide(cfg: Config, db: sqlite3.Connection, kalshi: str, pm: str, decision: str) -> None:
+def record(db: sqlite3.Connection, kalshi: str, pm: str, decision: str, source: str) -> None:
+    db.execute("INSERT OR REPLACE INTO decisions (kalshi, pm, decision, ts, source) VALUES (?,?,?,?,?)",
+               (kalshi, pm, decision, time.time(), source))
+
+
+def decide(cfg: Config, db: sqlite3.Connection, kalshi: str, pm: str, decision: str,
+           source: str = "human", note: str | None = None, commit: bool = True) -> None:
     """Record a review decision; approvals are appended to pairs.csv."""
     if decision not in ("same", "inverse", "reject"):
         raise ValueError(decision)
-    db.execute("INSERT OR REPLACE INTO decisions VALUES (?,?,?,?)", (kalshi, pm, decision, time.time()))
-    db.commit()
+    record(db, kalshi, pm, decision, source)
+    if commit:
+        db.commit()
     if decision != "reject":
-        k = db.execute("SELECT title FROM markets WHERE venue = 'K' AND id = ?", (kalshi,)).fetchone()
-        append_pair(cfg.pairs_path, kalshi, pm, decision, (k["title"] if k else "")[:80])
+        if note is None:
+            k = db.execute("SELECT title FROM markets WHERE venue = 'K' AND id = ?", (kalshi,)).fetchone()
+            note = (k["title"] if k else "")[:80]
+        append_pair(cfg.pairs_path, kalshi, pm, decision, note)
 
 
 def _pending(db: sqlite3.Connection, min_score: float, pairs_path: str) -> list[sqlite3.Row]:

@@ -9,6 +9,7 @@ import sqlite3
 
 import uvicorn
 
+from . import jev
 from .config import Config
 from .http import make_client
 from .jobs import RefreshJob
@@ -49,8 +50,9 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
 
     last_catalog = db.execute("SELECT MAX(updated) FROM markets").fetchone()[0]
     hub = Hub()
+    stages = ("catalog", "match") + (("review",) if jev.api_key(cfg) else ())
     job = RefreshJob(os.path.abspath(config_path) if config_path else None,
-                     cfg.refresh_interval_h * 3600, last_catalog, hub.publish)
+                     cfg.refresh_interval_h * 3600, last_catalog, hub.publish, stages=stages)
     async with make_client() as client:
         scanner = make_scanner(cfg, db, client)
         svc = Service(cfg, scanner, job, hub)

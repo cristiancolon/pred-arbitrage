@@ -1,4 +1,4 @@
-"""Rate-limited JSON GET client with retry/backoff."""
+"""Rate-limited JSON client with retry/backoff."""
 
 import asyncio
 import logging
@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class RateLimiter:
@@ -44,12 +46,18 @@ class Api:
         self.errors = 0
 
     async def get(self, path: str, params: Any = None, attempts: int = 6) -> Any:
+        return await self._send("GET", path, attempts, params=params)
+
+    async def post(self, path: str, body: Any, attempts: int = 6) -> Any:
+        return await self._send("POST", path, attempts, json=body)
+
+    async def _send(self, method: str, path: str, attempts: int, **kwargs: Any) -> Any:
         url = self.base + path
         for attempt in range(attempts):
             await self.limiter.acquire()
             self.requests += 1
             try:
-                r = await self.client.get(url, params=params)
+                r = await self.client.request(method, url, **kwargs)
             except httpx.TransportError as e:
                 self.errors += 1
                 wait = min(30.0, 2.0**attempt)
@@ -64,7 +72,7 @@ class Api:
                 continue
             if r.status_code >= 400:
                 self.errors += 1
-                raise ApiError(f"{self.name} {path}: HTTP {r.status_code}: {r.text[:200]}")
+                raise ApiError(f"{self.name} {path}: HTTP {r.status_code}: {r.text[:200]}", r.status_code)
             return r.json()
         raise ApiError(f"{self.name} {path}: gave up after {attempts} attempts")
 

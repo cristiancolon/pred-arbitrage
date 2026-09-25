@@ -45,11 +45,19 @@ class Config:
     web_host: str = "0.0.0.0"
     web_port: int = 8787
     web_token: str = ""
-    refresh_interval_h: float = 6.0
+    refresh_interval_h: float = 1.0
 
     catalog_horizon_days: int = 120
     match_min_score: float = 0.45
     auto_approve: tuple[AutoApproveRule, ...] = field(default_factory=tuple)
+
+    # Automatic review with TypeSafe's Jev model (jev.py). Enabled when an API key is
+    # set here or in the TYPESAFE_API_KEY environment variable. The model is pinned
+    # because jev.py's thresholds were tuned against it.
+    jev_api_key: str = ""
+    jev_model: str = "jev-1.13.0"
+    jev_rps: float = 8.0
+    jev_max_per_run: int = 10000
 
 
 def load(path: str | None) -> Config:
@@ -64,5 +72,14 @@ def load(path: str | None) -> Config:
     unknown = set(raw) - known
     if unknown:
         raise ValueError(f"unknown config keys in {path}: {', '.join(sorted(unknown))}")
-    rules = tuple(AutoApproveRule(**r) for r in raw.pop("auto_approve", []))
-    return Config(**raw, auto_approve=rules)
+    rule_keys = {f.name for f in fields(AutoApproveRule)}
+    rules = []
+    for r in raw.pop("auto_approve", []):
+        stray = set(r) - rule_keys
+        if stray & known:
+            raise ValueError(f"{path}: {', '.join(sorted(stray & known))} must come before the first "
+                             "[[auto_approve]] table (TOML puts keys after a table header inside that table)")
+        if stray:
+            raise ValueError(f"unknown auto_approve keys in {path}: {', '.join(sorted(stray))}")
+        rules.append(AutoApproveRule(**r))
+    return Config(**raw, auto_approve=tuple(rules))

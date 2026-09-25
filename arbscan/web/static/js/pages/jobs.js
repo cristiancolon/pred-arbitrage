@@ -5,6 +5,7 @@ import { Badge, Banner, Card, DataTable, Empty, Icon, Status } from "../ui.js";
 const STAGE_INFO = {
   catalog: "Download every open market on both venues",
   match: "Suggest equivalent pairs; apply auto-approve rules",
+  review: "Jev reads each new suggestion: approves clear matches, rejects clear mismatches, leaves the rest for you",
 };
 
 export function Jobs() {
@@ -54,7 +55,7 @@ export function Jobs() {
           <dl class="facts">
             <dt>Last success</dt><dd>${job.last_ok ? `${dateTime(job.last_ok)} (${ago(job.last_ok, now)})` : "never"}</dd>
             <dt>Catalog</dt><dd>${int(cat?.kalshi?.count)} Kalshi · ${int(cat?.pm?.count)} Polymarket US markets</dd>
-            <dt>Suggestions</dt><dd>${int(pipeline?.match?.candidates)} candidates · ${int(pipeline?.review?.pending)} awaiting review</dd>
+            <dt>Suggestions</dt><dd>${int(pipeline?.match?.candidates)} candidates · ${int(pipeline?.review?.pending)} pending review</dd>
           </dl>
         </div>
       <//>
@@ -63,8 +64,9 @@ export function Jobs() {
           columns=${[
             { key: "started", label: "Started", render: (h) => dateTime(h.started) },
             { key: "ok", label: "Result", render: (h) => h.ok ? html`<${Badge} tone="good" icon="check">OK<//>` : html`<${Badge} tone="critical" icon="xcircle">Failed<//>` },
-            { key: "catalog", label: "Catalog", cls: "num", sortValue: (h) => h.timings.catalog, render: (h) => duration(h.timings.catalog) },
-            { key: "match", label: "Match", cls: "num", sortValue: (h) => h.timings.match, render: (h) => duration(h.timings.match) },
+            { key: "catalog", label: "Catalog", cls: "num", sortValue: (h) => h.timings.catalog, render: (h) => (h.timings.catalog == null ? "—" : duration(h.timings.catalog)) },
+            ...job.stages.slice(1).map((st) => ({ key: st, label: st[0].toUpperCase() + st.slice(1), cls: "num",
+              sortValue: (h) => h.timings[st], render: (h) => (h.timings[st] == null ? "—" : duration(h.timings[st])) })),
           ]} />` : html`<${Empty} icon="jobs" title="No runs yet">Runs since the service started appear here.<//>`}
       <//>
     </div>

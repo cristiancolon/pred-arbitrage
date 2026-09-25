@@ -41,6 +41,24 @@ CREATE TABLE IF NOT EXISTS decisions (
     pm TEXT NOT NULL,
     decision TEXT NOT NULL,         -- 'same' | 'inverse' | 'reject'
     ts REAL NOT NULL,
+    source TEXT,                    -- 'human' | 'rule' (auto_approve) | 'jev'
+    PRIMARY KEY (kalshi, pm)
+);
+
+-- Jev's verdict on each candidate it has read (see jev.py). Kept across refreshes
+-- so a pair is only sent again when the matcher's relation or the markets' text
+-- changes.
+CREATE TABLE IF NOT EXISTS jev_reviews (
+    kalshi TEXT NOT NULL,
+    pm TEXT NOT NULL,
+    relation TEXT NOT NULL,         -- the relation the matcher proposed
+    input_hash TEXT NOT NULL,       -- hash of the request; re-asked when it changes
+    model TEXT,                     -- the versioned model that answered
+    verdict TEXT NOT NULL,          -- 'approve' | 'reject' | 'unsure'
+    reason TEXT,
+    answers TEXT,                   -- JSON: side probabilities and yes/no values
+    tokens INTEGER,
+    ts REAL NOT NULL,
     PRIMARY KEY (kalshi, pm)
 );
 
@@ -104,6 +122,7 @@ CREATE INDEX IF NOT EXISTS sweeps_ts ON sweeps (ts);
 
 # Columns added after the first release, so older databases can be upgraded in place.
 MIGRATIONS = {
+    "decisions": [("source", "TEXT")],
     "episodes": [("cost_at_max", "REAL")],
     "sweeps": [("best_edge", "REAL"), ("best_pair", "TEXT"), ("best_dir", "TEXT")],
 }

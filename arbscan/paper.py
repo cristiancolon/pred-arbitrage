@@ -208,9 +208,13 @@ class PaperTrader:
     # --- deciding (called from the scanner's hot path) ------------------------------------
 
     def consider(self, pair, label: str, k_side: str, p_side: str, kl, pl, k_coef: float, p_coef: float,
-                 days: float | None, window: float, seen_ts: float) -> None:
+                 days: float | None, window: float, seen_ts: float, seen=None) -> None:
+        """``seen``: the scanner's own walk of these books (ArbResult), to skip non-picks early."""
         key = (pair.id, label)
         if pair.id in self.busy or self.traded.get(key) == window:
+            return
+        if seen is not None and self.rules.reason(seen.top_edge, math.inf, days,
+                                                  bankroll.annualized(seen.profit, seen.cost, days)):
             return
         # Each venue's money is cash plus what's tied up in open positions; one pick gets
         # at most its stake cap of that, less the longer it locks the money up.

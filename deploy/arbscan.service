@@ -1,4 +1,5 @@
-# systemd *user* unit: install with deploy/install.sh (see README).
+# systemd *user* unit template: deploy/install.sh fills in @REPO_DIR@ with the
+# repo's actual location and installs it (see README).
 # Runs the scanner, the scheduled catalog/match refresh, and the dashboard.
 [Unit]
 Description=arbscan: Kalshi / Polymarket US arbitrage scanner + dashboard (read-only)
@@ -7,8 +8,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/pred-arbitrage
-ExecStart=%h/pred-arbitrage/.venv/bin/arbscan serve
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/.venv/bin/arbscan serve
 Restart=always
 RestartSec=15
 # Be a good neighbour to the Pi's other processes. Steady state is ~60-80 MB; a

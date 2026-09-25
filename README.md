@@ -85,14 +85,18 @@ but anyone who can reach it can approve or remove pairs.
 
 ## Setup on the Raspberry Pi
 
-Needs Python 3.11+ (Raspberry Pi OS Bookworm ships 3.11). Copy this directory to
-`~/pred-arbitrage` on the Pi, then:
+Needs Python 3.11+ (Raspberry Pi OS Bookworm ships 3.11). Clone the repo anywhere
+on the Pi, then:
 
 ```sh
-cd ~/pred-arbitrage
+git clone https://github.com/cristiancolon/pred-arbitrage
+cd pred-arbitrage
 cp config.example.toml config.toml     # optional; defaults are fine
 sh deploy/install.sh                   # venv + systemd user service + starts it
 ```
+
+The service points at wherever the repo lives. If you move it, re-run
+`deploy/install.sh`.
 
 Then open `http://<pi-address>:8787/`. On first start the service downloads the
 market catalog and runs matching by itself; this takes about two minutes, and you

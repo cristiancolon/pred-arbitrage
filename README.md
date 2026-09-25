@@ -25,10 +25,13 @@ catalog  ->  match  ->  review  ->  scan  ->  report
    Jev reads both rulebooks for each one: it approves clear matches, rejects clear
    mismatches, and leaves the rest in a queue that shows both rulebooks side by side
    for you to decide. Approved pairs go to `pairs.csv`.
-4. **scan** polls the approved pairs every few seconds. For each pair it checks both
-   directions (e.g. buy Kalshi YES + Polymarket NO) and computes the edge after both
-   taker fees. When that edge is positive it fetches depth and walks both order
-   books. The result is how many contracts are profitable and for how many dollars.
+4. **scan** watches the approved pairs. With API keys for both venues it streams
+   their order books over WebSockets and re-prices a pair the moment either side
+   changes; without keys it polls them every second or so (see [Latency](#latency)).
+   For each pair it checks both directions (e.g. buy Kalshi YES + Polymarket NO) and
+   computes the edge after both taker fees. When that edge is positive it walks both
+   order books. The result is how many contracts are profitable and for how many
+   dollars.
 5. **report** summarizes profitable windows: how often, how big, how long they last,
    and the return on the capital they tie up.
 
@@ -48,7 +51,7 @@ to break even.
 
 - **Execution risk.** The two legs can't be filled atomically. By the time you act,
   prices may have moved.
-- **Windows shorter than the poll interval** (3 s by default). Most of those belong to
+- **Windows shorter than the polling interval**, when polling (~1–3 s). Most of those belong to
   faster bots anyway.
 - **Capital lockup.** The report shows days until resolution and an annualized return
   so you can compare it with just holding cash.
@@ -193,16 +196,44 @@ systemctl --user restart arbscan
 `TYPESAFE_API_KEY` in the environment works too. `jev_model` is pinned to
 `jev-1.13.0` because the thresholds were tuned on it.
 
+### Latency
+
+How quickly the scanner sees a price change depends on the mode, which the Overview
+page shows:
+
+| Mode | How | Staleness of a price |
+|---|---|---|
+| **Streaming** (both venues' API keys) | WebSocket order books: Kalshi `orderbook_delta` (snapshot, then sequenced deltas) and Polymarket US `MARKET_DATA` (full book and trading state per update). Each update re-prices only the pairs using that market, in well under a millisecond. | The network delay from the exchange, typically tens of ms. The dashboard shows the median delay from the exchange's timestamp to the computed edge. |
+| **Polling** (no keys) | Each sweep fetches both venues for ~100 pairs at a time, together, at 15 requests/s per venue, and walks depth for the pairs that look profitable. | ~0.5 s with a few hundred pairs, ~3 s with ~4,000. |
+
+Streaming also fixes a source of phantom opportunities. When polling, two prices a
+few seconds apart can look like a 30¢ gap during a live game. Polymarket US also
+reports when a market is suspended or halted, and those pairs are paused instead of
+compared against a frozen quote.
+
+To stream, create keys on both venues and put them in `config.toml` (above any
+`[[auto_approve]]` table), then restart:
+
+- **Kalshi:** Account → Profile → API Keys → Create New API Key. Keep the downloaded
+  private key file outside the repo, e.g. `~/.config/arbscan/kalshi.key`
+  (`chmod 600`), and set `kalshi_key_id` and `kalshi_private_key_path`.
+- **Polymarket US:** [polymarket.us/developer](https://polymarket.us/developer) →
+  create a key; set `pmus_key_id` and `pmus_secret_key` (shown once).
+
+These keys can place orders, even though arbscan never does. Keep `config.toml` and
+the key file readable only by you.
+
 ### Resource use
 
 | | |
 |---|---|
-| Service (scanner + dashboard) | ~60 MB RAM. With a few hundred pairs, each sweep is a handful of requests. |
+| Service (scanner + dashboard) | ~100–200 MB RAM with a few thousand pairs (streamed books are small). Runs at normal CPU priority so feed messages are handled promptly. |
 | Refresh (hourly) | A separate low-priority process for ~2 minutes (plus the Jev review, which only sends new pairs). It peaks around 200 MB during catalog and match, then exits. |
-| Limits | The systemd unit caps the whole service at 768 MB (soft limit 500 MB), leaving the rest of the Pi's memory to other processes. |
+| Limits | The systemd unit caps the whole service at 3 GB (soft limit 2 GB). |
 | Disk | Top-of-book quotes are written only when they change. Depth snapshots are stored only for profitable observations. Expect tens of MB/day for a few hundred pairs. |
 
-SQLite runs in WAL mode with `synchronous=NORMAL` and commits once per sweep, which
+SQLite runs in WAL mode with `synchronous=NORMAL` and commits once per sweep (once a
+second when streaming), which
 keeps SD-card writes low. Dashboard queries use their own short-lived read
 connections on worker threads, so a slow page never stalls the scanner.
 
@@ -218,7 +249,7 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `quotes` | top of book per pair, written on change, with the net edge per direction |
 | `opportunities` | each profitable depth-walked observation, with both order books (JSON) |
 | `episodes` | contiguous profitable runs: start/end, peak edge, peak profit, capital, days to resolution |
-| `sweeps` | scanner health: timing, requests, errors |
+| `sweeps` | scanner health: one row per sweep (polling) or per second (streaming, where `dur_ms` is the median exchange-to-edge latency) |
 
 ## Tests
 

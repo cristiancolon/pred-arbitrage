@@ -118,7 +118,9 @@ def overview(db: sqlite3.Connection, hours: float) -> dict:
         "profit": buckets,
         "kpi": {
             "sweeps": sweeps, "errors": errors,
-            "avg_sweep_ms": round(sum(r[3] * r[5] for r in rows if r[3]) / sweeps) if sweeps else None,
+            "avg_sweep_ms": (round(sum(r[3] * r[5] for r in rows if r[3] is not None)
+                                   / sum(r[5] for r in rows if r[3] is not None))
+                             if any(r[3] is not None for r in rows) else None),
             "windows": len(eps), "profit": sum(e[2] or 0 for e in eps), "capital": sum(e[3] or 0 for e in eps),
             "median_duration": statistics.median(durations) if durations else None,
             "best_edge": best[0] if best else None, "best_pair": best[1] if best else None,

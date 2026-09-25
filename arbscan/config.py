@@ -22,14 +22,26 @@ class Config:
     db_path: str = "data/arbscan.db"
     pairs_path: str = "pairs.csv"
 
-    kalshi_base: str = "https://api.elections.kalshi.com/trade-api/v2"
+    kalshi_base: str = "https://external-api.kalshi.com/trade-api/v2"
     pmus_base: str = "https://gateway.polymarket.us"
-    # Requests per second. Kalshi doesn't publish an unauthenticated limit, and
-    # Polymarket US's public gateway throttles bursts well below its stated 20/s.
-    kalshi_rps: float = 5.0
-    pmus_rps: float = 3.0
+    # REST requests per second (metadata, and polling when not streaming). Both public
+    # APIs sustained 20/s in testing; Polymarket US documents 20/s per IP.
+    kalshi_rps: float = 15.0
+    pmus_rps: float = 15.0
 
-    poll_interval_s: float = 3.0
+    # Streaming (live.py): with API keys for both venues the scanner prices pairs from
+    # WebSocket order books the moment they change instead of polling. The Kalshi key
+    # is a Key ID plus a private key file; the Polymarket US key is a Key ID plus the
+    # base64 secret from polymarket.us/developer.
+    kalshi_key_id: str = ""
+    kalshi_private_key_path: str = ""
+    pmus_key_id: str = ""
+    pmus_secret_key: str = ""
+    kalshi_ws_url: str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+    pmus_ws_url: str = "wss://api.polymarket.us/v1/ws/markets"
+
+    # Polling (no keys): start a new sweep this long after the previous one started.
+    poll_interval_s: float = 1.0
     # Refresh market status / close times / fee params this often.
     meta_refresh_s: float = 300.0
     # Fetch Polymarket US depth for a pair once its top-of-book net edge exceeds this ($).
@@ -58,6 +70,10 @@ class Config:
     jev_model: str = "jev-1.13.0"
     jev_rps: float = 8.0
     jev_max_per_run: int = 10000
+
+    @property
+    def can_stream(self) -> bool:
+        return bool(self.kalshi_key_id and self.kalshi_private_key_path and self.pmus_key_id and self.pmus_secret_key)
 
 
 def load(path: str | None) -> Config:

@@ -5,14 +5,22 @@
 db_path = "data/arbscan.db"
 pairs_path = "pairs.csv"
 
-# Seconds between sweeps. Each sweep costs ~1 Kalshi request per 100 pairs and
-# ~1 Polymarket US request per 100 pairs, plus a few order-book fetches.
-poll_interval_s = 3.0
+# Streaming (lowest latency). With API keys for both venues, the scanner keeps
+# live order books from their WebSocket feeds and prices each pair the moment
+# either side changes. Without them it polls (below). Keep these files private.
+# kalshi_key_id = "a952bcbe-..."                          # Kalshi: Account > API Keys
+# kalshi_private_key_path = "~/.config/arbscan/kalshi.key"  # the file Kalshi downloaded
+# pmus_key_id = "..."                                     # polymarket.us/developer
+# pmus_secret_key = "..."                                 # shown once when you create the key
 
-# Requests per second per venue. Polymarket US's public gateway throttles bursts
-# well below its documented 20/s, so stay conservative.
-kalshi_rps = 5.0
-pmus_rps = 3.0
+# Polling (no keys): start a sweep this often. Each sweep costs ~1 Kalshi and ~1
+# Polymarket US request per 100 pairs, fetched together so both sides of a pair
+# are priced from the same moment.
+poll_interval_s = 1.0
+
+# REST requests per second per venue. Both public APIs sustained 20/s in testing.
+kalshi_rps = 15.0
+pmus_rps = 15.0
 
 # Only count contract pairs whose marginal profit after both taker fees is above
 # this many dollars (0.01 = 1c per $1 pair).

@@ -12,11 +12,11 @@ WorkingDirectory=@REPO_DIR@
 ExecStart=@REPO_DIR@/.venv/bin/arbscan serve
 Restart=always
 RestartSec=15
-# Be a good neighbour to the Pi's other processes. Steady state is ~60-80 MB; a
-# refresh adds a ~200 MB subprocess for a couple of minutes every few hours.
-Nice=10
-MemoryHigh=500M
-MemoryMax=768M
+# Normal CPU priority so the price feeds are handled promptly; the hourly refresh
+# (catalog, match, Jev review) runs as a separate niced subprocess instead. Steady
+# state is ~100-200 MB with a few thousand streamed books; a refresh adds ~200 MB.
+MemoryHigh=2G
+MemoryMax=3G
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

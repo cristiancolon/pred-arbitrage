@@ -129,7 +129,7 @@ export function Review() {
     setBusy(true);
     try {
       await api("/api/candidates/decide", { method: "POST", body: { kalshi: cur.kalshi, pm: cur.pm, decision } });
-      toast(decision === "reject" ? "Rejected" : `Approved as ${decision}. Scanning starts next sweep.`);
+      toast(decision === "reject" ? "Rejected" : `Approved as ${decision}. Scanning starts within seconds.`);
       setItems((xs) => xs.filter((x) => x !== cur));
       setTotal((t) => t - 1);
       setSel((i) => Math.min(i, items.length - 2));

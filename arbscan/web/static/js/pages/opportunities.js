@@ -20,7 +20,7 @@ export function Opportunities() {
   return html`
     <div class="filters">
       <${Seg} label="Time range" options=${RANGES} value=${hours} onChange=${setHours} />
-      <span class="muted" style="font-size:12.5px">A window is a run of consecutive sweeps where a pair was profitable after fees, walked through both books.</span>
+      <span class="muted" style="font-size:12.5px">A window is a stretch of time in which a pair stayed profitable after fees, walked through both books.</span>
     </div>
     <div class="kpis">
       <${Tile} label="Profitable windows" value=${int(data?.total)} foot=${durations.length ? `median ${duration(durations[durations.length >> 1])} open` : "none in this range"} />

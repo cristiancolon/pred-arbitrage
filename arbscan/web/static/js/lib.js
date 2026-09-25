@@ -83,6 +83,16 @@ export function useNow(ms = 1000) {
   return now;
 }
 
+// The value once it has stopped changing for `ms` (e.g. a search box, so each keystroke isn't a request).
+export function useDebounced(value, ms = 250) {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return v;
+}
+
 // ---------- routing ----------
 export function parseRoute() {
   const [page, query = ""] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");

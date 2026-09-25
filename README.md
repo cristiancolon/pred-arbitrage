@@ -22,9 +22,9 @@ catalog  ->  match  ->  review  ->  scan  ->  report
    or Kalshi's NO (**inverse**, e.g. Kalshi "Braves win" vs a Reds/Braves moneyline
    whose long side is the Reds).
 3. **review** decides which suggestions are really the same bet. With a TypeSafe key,
-   Jev reads both rulebooks for each one: it approves clear matches, rejects clear
-   mismatches, and leaves the rest in a queue that shows both rulebooks side by side
-   for you to decide. Approved pairs go to `pairs.csv`.
+   Jev reads both rulebooks for each one and approves only the pairs it is sure of;
+   everything else is rejected, including the ones it can't decide. Approved pairs go
+   to `pairs.csv`.
 4. **scan** watches the approved pairs. With API keys for both venues it streams
    their order books over WebSockets and re-prices a pair the moment either side
    changes; without keys it polls them every second or so (see [Latency](#latency)).
@@ -49,7 +49,7 @@ to break even.
 
 ### Sizing to your bankroll
 
-Opportunities are sized to `bankroll_usd` ($500 by default), assumed split evenly
+Opportunities are sized to `bankroll_usd` ($200 by default), assumed split evenly
 across the two venues because each leg is paid for on its own venue. A window's size,
 capital and profit are what $250 on each side could buy at that moment. Summing
 windows would still assume a fresh bankroll for each one, so the Overview also
@@ -69,7 +69,7 @@ the order books stored with each observation (`arbscan rescale` does it by hand)
 - **Capital lockup.** The report shows days until resolution and an annualized return
   so you can compare it with just holding cash.
 - **Settlement mismatch.** If two paired markets resolve differently, you lose both
-  legs. Review is the defence. Treat any gap that's large (>5¢) or lasts for hours as
+  legs. Jev's review is the defence. Treat any gap that's large (>5¢) or lasts for hours as
   a sign the markets aren't really equivalent, not as free money. The report flags these.
 
 ## The dashboard
@@ -83,14 +83,10 @@ Nothing needs a button press: new markets flow through to the scanner on their o
   closest-to-breakeven leaderboard, both updated after every sweep. Best-case profit
   by hour.
 - **Pairs.** Every watched pair with live prices and the net edge in both
-  directions. Click a pair for its edge history, past windows and both rulebooks,
-  or to stop watching it.
-- **Review.** The review queue in the browser. Each candidate shows a diagram of
-  which outcome on one venue matches which on the other, plus both rulebooks side by
-  side with numbers, dates and settlement wording (draws, postponement, exclusions)
-  highlighted. Keys: `S` same, `I` inverse, `R` reject, `J`/`K` next/previous. With
-  Jev on, each pair it couldn't decide shows why, and a "Rejected by Jev" view lets
-  you spot-check its rejections and overrule one by approving it.
+  directions, 100 at a time (filtered and sorted on the server). Click a pair for
+  which outcome matches which, its edge history, past windows and both rulebooks
+  side by side with numbers, dates and settlement wording highlighted, or to stop
+  watching it.
 - **Opportunities.** Every profitable window: how long it lasted, how big the edge
   got, the capital it needed, and a flag on the ones that look like a rules
   mismatch.
@@ -123,8 +119,8 @@ The service points at wherever the repo lives. If you move it, re-run
 Then open `http://<pi-address>:8787/`. On first start the service downloads the
 market catalog and runs matching by itself; this takes about two minutes, and you
 can watch it on the **Refresh job** page. With a Jev key (see below), pairs are then
-approved automatically; without one, approve them in **Review**. The scanner picks
-them up on its next sweep.
+approved automatically; without one, use `[[auto_approve]]` rules or
+`arbscan review` in a terminal. The scanner picks them up right away.
 
 ```sh
 journalctl --user -u arbscan -f        # live log, including OPEN/CLOSE lines per opportunity
@@ -201,15 +197,16 @@ labels and rules, and asks three questions in one call:
 
 A pair is approved only if Jev picks the side the matcher proposed (P ≥ 0.6), the
 scope matches and the rules agree. It is rejected if Jev is confident neither side is
-the same bet. Everything else stays in the Review queue, with Jev's reason. The
-questions and thresholds live together at the top of `jev.py`.
+the same bet. Anything else (Jev unsure) is rejected too: a pair is only watched when
+Jev is sure of it. Jev's reason is kept in the `jev_reviews` table. The questions and
+thresholds live together at the top of `jev.py`.
 
 Validation (jev-1.13.0): on ~140 hand-labelled pairs it approved all 76 equivalent ones
 and none of the 43 wrong games, flipped sides or different competitions. One subtle
 case got through: Kalshi counts a #1 album any time in 2026, while Polymarket only
 counts charts after its market opened. On 70 further pairs it hadn't been tuned on,
 all 50 approvals were correct. Its mistakes lean safe: a few valid pairs get rejected
-or left unsure. Because the scanner never trades, a wrong approval shows up as a
+(unsure counts as a rejection). Because the scanner never trades, a wrong approval shows up as a
 suspicious opportunity, not a loss. Still, read both rulebooks before trading on one.
 
 Cost is ~900 input tokens per pair at $0.042 per million: about $0.20 for a first

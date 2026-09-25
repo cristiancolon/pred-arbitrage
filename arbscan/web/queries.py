@@ -1,7 +1,6 @@
 """Read-side queries for the dashboard. Each takes a short-lived SQLite connection
 (see ``store.open_db``) and returns plain JSON-able data."""
 
-import json
 import sqlite3
 import statistics
 import time
@@ -59,14 +58,15 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
     decisions = dict(db.execute("SELECT decision, COUNT(*) FROM decisions GROUP BY decision").fetchall())
     jev = dict(db.execute(
         "SELECT decision = 'reject', COUNT(*) FROM decisions WHERE source = 'jev' GROUP BY 1").fetchall())
-    pending = [
-        r[2] for r in db.execute(
-            "SELECT c.kalshi, c.pm, j.verdict FROM candidates c "
-            "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
-            "LEFT JOIN jev_reviews j ON j.kalshi = c.kalshi AND j.pm = c.pm "
-            "WHERE d.kalshi IS NULL")
+    jev_unsure = db.execute(
+        "SELECT COUNT(*) FROM decisions d JOIN jev_reviews j ON j.kalshi = d.kalshi AND j.pm = d.pm "
+        "WHERE d.source = 'jev' AND d.decision = 'reject' AND j.verdict = 'unsure'").fetchone()[0]
+    pending = sum(
+        1 for r in db.execute(
+            "SELECT c.kalshi, c.pm FROM candidates c "
+            "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm WHERE d.kalshi IS NULL")
         if (r[0], r[1]) not in paired
-    ]
+    )
     disc = {"hour": dict(db.execute("SELECT venue, COUNT(*) FROM discovered WHERE ts >= ? GROUP BY venue",
                                      (now - 3600,)).fetchall()),
             "day": dict(db.execute("SELECT venue, COUNT(*) FROM discovered WHERE ts >= ? GROUP BY venue",
@@ -82,11 +82,10 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
                     "pm": cat.get("P", {"count": 0, "updated": None})},
         "match": {"candidates": n_cand, "confident": confident, "updated": created},
         "discovery": disc,
-        "review": {"pending": len(pending),
+        "review": {"pending": pending,
                    "approved": decisions.get("same", 0) + decisions.get("inverse", 0),
                    "rejected": decisions.get("reject", 0), "auto": auto,
-                   "jev": {"approved": jev.get(0, 0), "rejected": jev.get(1, 0),
-                           "unsure": pending.count("unsure"), "unreviewed": pending.count(None)}},
+                   "jev": {"approved": jev.get(0, 0), "rejected": jev.get(1, 0), "unsure": jev_unsure}},
         "report": {"windows_24h": windows, "profit_24h": profit, "capital_24h": capital},
     }
 
@@ -164,51 +163,6 @@ def pair_detail(db: sqlite3.Connection, pair: str, hours: float) -> dict:
         "pm": markets(db, "P", [p], rules=True).get(p),
         "history": history, "since": since, "episodes": eps,
     }
-
-
-def _jev(row: sqlite3.Row) -> dict | None:
-    if row["verdict"] is None:
-        return None
-    return {"verdict": row["verdict"], "reason": row["reason"], "model": row["model"], "ts": row["jts"],
-            "answers": json.loads(row["answers"]) if row["answers"] else None}
-
-
-def candidates(db: sqlite3.Connection, paired: set[tuple[str, str]], min_score: float, confident: bool,
-               relation: str | None, q: str | None, offset: int, limit: int, view: str = "pending") -> dict:
-    """view: 'pending' (undecided), 'unsure' (Jev couldn't decide), 'unreviewed' (Jev
-    hasn't read it yet) or 'rejected' (Jev rejected it; approving overrides that)."""
-    sql = ("SELECT c.kalshi, c.pm, c.score, c.relation, c.confident, "
-           "j.verdict, j.reason, j.answers, j.model, j.ts AS jts FROM candidates c "
-           "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
-           "LEFT JOIN jev_reviews j ON j.kalshi = c.kalshi AND j.pm = c.pm "
-           "JOIN markets k ON k.venue = 'K' AND k.id = c.kalshi "
-           "JOIN markets p ON p.venue = 'P' AND p.id = c.pm "
-           "WHERE c.score >= ?")
-    args: list = [min_score]
-    if view == "rejected":
-        sql += " AND d.source = 'jev' AND d.decision = 'reject'"
-    else:
-        sql += " AND d.kalshi IS NULL"
-        if view == "unsure":
-            sql += " AND j.verdict = 'unsure'"
-        elif view == "unreviewed":
-            sql += " AND j.kalshi IS NULL"
-    if confident:
-        sql += " AND c.confident = 1"
-    if relation in ("same", "inverse"):
-        sql += " AND c.relation = ?"
-        args.append(relation)
-    if q:
-        sql += " AND (k.title LIKE ? OR p.title LIKE ? OR c.kalshi LIKE ? OR c.pm LIKE ?)"
-        args += [f"%{q}%"] * 4
-    sql += " ORDER BY c.confident DESC, c.score DESC"
-    rows = [r for r in db.execute(sql, args) if (r[0], r[1]) not in paired]
-    page = rows[offset : offset + limit]
-    km = markets(db, "K", [r[0] for r in page], rules=True)
-    pm = markets(db, "P", [r[1] for r in page], rules=True)
-    items = [{"kalshi": r[0], "pm": r[1], "score": r[2], "relation": r[3], "confident": bool(r[4]),
-              "jev": _jev(r), "k": km.get(r[0]), "p": pm.get(r[1])} for r in page]
-    return {"total": len(rows), "offset": offset, "items": items}
 
 
 def opportunities(db: sqlite3.Connection, hours: float) -> dict:

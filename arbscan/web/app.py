@@ -21,7 +21,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .. import jev, review
+from .. import jev
 from ..config import Config
 from ..jobs import RefreshJob
 from ..pairs import remove_pairs
@@ -33,6 +33,15 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 CLOSEST_N = 8
+OPEN_N = 20  # open windows sent with every live update; the full list is on the Opportunities page
+PAIR_STATUSES = ("live", "paused", "finished")
+PAIR_SORTS = {
+    "best": lambda p: max((e for e in (p.get("edges") or {}).values() if e is not None), default=None),
+    "k_title": lambda p: p.get("k_title"),
+    "relation": lambda p: p.get("relation"),
+    "days": lambda p: p.get("days"),
+    "status": lambda p: p.get("status"),
+}
 
 
 def _encode(data: Any) -> bytes:
@@ -125,7 +134,7 @@ class Service:
         ranked.sort(key=lambda x: -x[0])
         closest = [{"pair": pid, "direction": d, "edge": e, "relation": s.get("relation"), **self._names(pid)}
                    for e, pid, d, s in ranked[:CLOSEST_N]]
-        open_eps = [{**self._names(ep["pair"]), **ep} for ep in sc.episodes.snapshot()]
+        open_eps = sorted(sc.episodes.snapshot(), key=lambda e: -e["profit"])
         return {
             "now": time.time(),
             "scanner": {
@@ -135,7 +144,8 @@ class Service:
                 "pairs": {"total": len(sc.pairs.pairs), "live": statuses.count("live"),
                           "paused": statuses.count("paused"), "finished": len(sc.finished)},
             },
-            "open": sorted(open_eps, key=lambda e: -e["profit"]),
+            "open": [{**self._names(ep["pair"]), **ep} for ep in open_eps[:OPEN_N]],
+            "open_count": len(open_eps),
             "closest": closest,
             "job": self.job.snapshot(),
             "discovery": self.discovery.snapshot() if self.discovery else None,
@@ -205,16 +215,34 @@ def create_app(svc: Service) -> Starlette:
                "min_annualized": cfg.sim_min_annualized_return, "max_edge": cfg.sim_max_edge}
         return JSON(await svc.read(queries.overview, _float(request, "hours", 24, 0.25, 24 * 90), sim))
 
-    async def pairs(_: Request) -> Response:
+    async def pairs(request: Request) -> Response:
+        """One page of watched pairs, filtered and sorted here: the full list runs to
+        thousands of rows, too many to send to a browser every few seconds."""
+        qp = request.query_params
         sc = svc.scanner
-        out = []
+        rows = []
         for p in sc.pairs.pairs:
             st = sc.pair_state.get(p.id, {})
             status = "finished" if p.id in sc.finished else st.get("status", "pending")
-            out.append({"id": p.id, "kalshi": p.kalshi, "pm": p.pm, "relation": p.relation, "note": p.note,
-                        "status": status, **{k: v for k, v in st.items() if k not in ("status", "relation")},
-                        **svc._names(p.id)})
-        return JSON({"pairs": out, "now": time.time()})
+            rows.append({"id": p.id, "kalshi": p.kalshi, "pm": p.pm, "relation": p.relation, "note": p.note,
+                         "status": status, **{k: v for k, v in st.items() if k not in ("status", "relation")},
+                         **svc._names(p.id)})
+        counts = {"all": len(rows), **{s: sum(1 for r in rows if r["status"] == s) for s in PAIR_STATUSES}}
+        if qp.get("status") in PAIR_STATUSES:
+            rows = [r for r in rows if r["status"] == qp["status"]]
+        if qp.get("relation") in ("same", "inverse"):
+            rows = [r for r in rows if r["relation"] == qp["relation"]]
+        needle = (qp.get("q") or "").strip().lower()
+        if needle:
+            rows = [r for r in rows if needle in f"{r.get('k_title')} {r.get('p_title')} {r['id']}".lower()]
+        key = PAIR_SORTS.get(qp.get("sort") or "best", PAIR_SORTS["best"])
+        known = [r for r in rows if key(r) is not None]
+        known.sort(key=key, reverse=qp.get("dir", "desc") != "asc")
+        rows = known + [r for r in rows if key(r) is None]  # blanks last either way
+        offset = int(_float(request, "offset", 0, 0, 1e9))
+        limit = int(_float(request, "limit", 100, 1, 500))
+        return JSON({"items": rows[offset:offset + limit], "total": len(rows), "offset": offset,
+                     "counts": counts, "now": time.time()})
 
     async def pair(request: Request) -> Response:
         pid = request.query_params.get("id", "")
@@ -234,24 +262,6 @@ def create_app(svc: Service) -> Starlette:
             ids |= set(svc.scanner.finished)
         n = await asyncio.to_thread(remove_pairs, svc.cfg.pairs_path, ids)
         return JSON({"removed": n})
-
-    async def candidates(request: Request) -> Response:
-        qp = request.query_params
-        data = await svc.read(
-            queries.candidates, svc.paired(), _float(request, "min_score", svc.cfg.match_min_score, 0, 2),
-            qp.get("confident") == "1", qp.get("relation"), (qp.get("q") or "").strip() or None,
-            int(_float(request, "offset", 0, 0, 1e9)), int(_float(request, "limit", 40, 1, 200)),
-            qp.get("view") if qp.get("view") in ("unsure", "unreviewed", "rejected") else "pending",
-        )
-        return JSON(data)
-
-    async def decide(request: Request) -> Response:
-        body = await request.json()
-        k, p, d = body.get("kalshi"), body.get("pm"), body.get("decision")
-        if not k or not p or d not in ("same", "inverse", "reject"):
-            return JSON({"error": "need kalshi, pm and decision in same|inverse|reject"}, status_code=400)
-        await svc.write(lambda db: review.decide(svc.cfg, db, k, p, d))
-        return JSON({"ok": True})
 
     async def opportunities(request: Request) -> Response:
         return JSON(await svc.read(queries.opportunities, _float(request, "hours", 24, 0.25, 24 * 90)))
@@ -277,8 +287,6 @@ def create_app(svc: Service) -> Starlette:
             Route("/api/pairs", pairs),
             Route("/api/pair", pair),
             Route("/api/pairs/remove", remove, methods=["POST"]),
-            Route("/api/candidates", candidates),
-            Route("/api/candidates/decide", decide, methods=["POST"]),
             Route("/api/opportunities", opportunities),
             Route("/api/jobs", jobs),
             Route("/api/jobs/refresh", refresh, methods=["POST"]),

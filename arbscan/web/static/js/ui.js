@@ -1,6 +1,6 @@
 // Shared UI pieces.
 import { html, useEffect, useState } from "./vendor/preact-htm.js";
-import { cents, pmTitle, splitTitle, useStore } from "./lib.js";
+import { cents, int, pmTitle, splitTitle, useStore } from "./lib.js";
 
 const ICONS = {
   overview: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>',
@@ -162,11 +162,16 @@ export function Kbd({ children }) {
   return html`<kbd>${children}</kbd>`;
 }
 
-// A table with click-to-sort headers.
-export function DataTable({ columns, rows, rowKey, onRowClick, initialSort, empty }) {
-  const [sort, setSort] = useState(initialSort || null);
+// A table with click-to-sort headers. Pass `sort` and `onSort` when the server sorts
+// (rows arrive in order); `limit` renders that many rows with a "Show more" button,
+// since a few thousand rows is enough to stall the browser.
+export function DataTable({ columns, rows, rowKey, onRowClick, initialSort, sort: sortProp, onSort, empty, limit, footer }) {
+  const [own, setOwn] = useState(initialSort || null);
+  const [shown, setShown] = useState(limit || Infinity);
+  const sort = onSort ? sortProp : own;
+  const setSort = onSort ? (f) => onSort(f(sort)) : setOwn;
   let sorted = rows;
-  if (sort) {
+  if (sort && !onSort) {
     const col = columns.find((c) => c.key === sort.key);
     const get = col?.sortValue || ((r) => r[sort.key]);
     sorted = [...rows].sort((a, b) => {
@@ -178,12 +183,28 @@ export function DataTable({ columns, rows, rowKey, onRowClick, initialSort, empt
     });
   }
   if (!rows.length && empty) return empty;
+  const visible = sorted.length > shown ? sorted.slice(0, shown) : sorted;
   return html`<div class="table-wrap"><table class="data">
     <thead><tr>${columns.map((c) => html`<th class=${`${c.cls || ""} ${c.sortable !== false ? "sortable" : ""}`}
       aria-sort=${sort?.key === c.key ? (sort.dir === "desc" ? "descending" : "ascending") : undefined}
       onClick=${() => c.sortable !== false && setSort((s) => ({ key: c.key, dir: s?.key === c.key && s.dir === "desc" ? "asc" : "desc" }))}>
       ${c.label}${sort?.key === c.key ? (sort.dir === "desc" ? " ↓" : " ↑") : ""}</th>`)}</tr></thead>
-    <tbody>${sorted.map((r) => html`<tr key=${rowKey(r)} class=${onRowClick ? "clickable" : ""} onClick=${onRowClick ? () => onRowClick(r) : undefined}>
+    <tbody>${visible.map((r) => html`<tr key=${rowKey(r)} class=${onRowClick ? "clickable" : ""} onClick=${onRowClick ? () => onRowClick(r) : undefined}>
       ${columns.map((c) => html`<td class=${c.cls || ""}>${c.render ? c.render(r) : r[c.key]}</td>`)}</tr>`)}</tbody>
-  </table></div>`;
+  </table></div>
+  ${visible.length < sorted.length && html`<div class="table-foot">
+    <span>Showing ${int(visible.length)} of ${int(sorted.length)}</span><span class="spacer"></span>
+    <button class="btn sm" onClick=${() => setShown(shown + limit)}>Show ${int(Math.min(limit, sorted.length - visible.length))} more</button>
+  </div>`}
+  ${footer}`;
+}
+
+// "1–100 of 4,539" with previous/next, for lists paged by the server.
+export function Pager({ offset, limit, total, onChange }) {
+  if (total <= limit) return null;
+  return html`<div class="table-foot">
+    <span>${int(offset + 1)}–${int(Math.min(offset + limit, total))} of ${int(total)}</span><span class="spacer"></span>
+    <button class="btn sm" disabled=${offset === 0} onClick=${() => onChange(Math.max(0, offset - limit))}>Previous</button>
+    <button class="btn sm" disabled=${offset + limit >= total} onClick=${() => onChange(offset + limit)}>Next</button>
+  </div>`;
 }

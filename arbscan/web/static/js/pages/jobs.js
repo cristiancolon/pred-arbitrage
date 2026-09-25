@@ -27,7 +27,7 @@ function Discovery({ d, stats, now }) {
 const STAGE_INFO = {
   catalog: "Download every open market on both venues",
   match: "Suggest equivalent pairs; apply auto-approve rules",
-  review: "Jev reads each new suggestion: approves clear matches, rejects clear mismatches, leaves the rest for you",
+  review: "Jev reads each new suggestion: approves clear matches and rejects everything else, including pairs it isn't sure of",
 };
 
 export function Jobs() {
@@ -78,7 +78,7 @@ export function Jobs() {
           <dl class="facts">
             <dt>Last success</dt><dd>${job.last_ok ? `${dateTime(job.last_ok)} (${ago(job.last_ok, now)})` : "never"}</dd>
             <dt>Catalog</dt><dd>${int(cat?.kalshi?.count)} Kalshi · ${int(cat?.pm?.count)} Polymarket US markets</dd>
-            <dt>Suggestions</dt><dd>${int(pipeline?.match?.candidates)} candidates · ${int(pipeline?.review?.pending)} pending review</dd>
+            <dt>Suggestions</dt><dd>${int(pipeline?.match?.candidates)} candidates · ${int(pipeline?.review?.pending)} waiting for Jev</dd>
           </dl>
         </div>
       <//>

@@ -311,6 +311,8 @@ table.data th.sortable { cursor: pointer; user-select: none; }
 table.data th.sortable:hover { color: var(--text-1); }
 table.data td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 table.data tr:last-child td { border-bottom: 0; }
+.table-foot { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.table-foot .spacer { flex: 1; }
 table.data td.r, table.data th.r { text-align: right; }
 table.data td.num, table.data th.num { font-variant-numeric: tabular-nums; text-align: right; }
 table.data tbody tr.clickable { cursor: pointer; }
@@ -370,28 +372,8 @@ table.data td.market .pair-name { min-width: 180px; }
 @keyframes slidein { from { transform: translateX(24px); opacity: 0; } }
 @keyframes fade { from { opacity: 0; } }
 
-/* ---------- review ---------- */
-.review { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 18px; align-items: start; }
-.queue { position: sticky; top: 84px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; }
-.queue-filters { padding: 14px; display: grid; gap: 10px; border-bottom: 1px solid var(--border); }
-.queue-filters .search .input { width: 100%; }
-.queue-filters .search { display: flex; }
-.queue-list { overflow: auto; flex: 1; }
-.q-item { display: grid; gap: 3px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; border-left: 3px solid transparent; }
-.q-item:hover { background: var(--surface-2); }
-.q-item.sel { background: var(--accent-soft); border-left-color: var(--accent); }
-.q-item .row1 { display: flex; align-items: center; gap: 8px; }
-.q-item .k { font-size: 13px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.q-item .p { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.score { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 650; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.score .track { width: 38px; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
-.score .track i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
-.q-item .row1 .spacer { flex: 1; }
-.jev-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.jev-facts b { color: var(--text-1); font-weight: 650; }
-
+/* ---------- rulebooks ---------- */
 .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-@media (max-width: 1100px) { .review { grid-template-columns: 1fr; } .queue { position: static; max-height: 420px; } }
 @media (max-width: 760px) { .compare { grid-template-columns: 1fr; } }
 .venue { display: grid; gap: 10px; align-content: start; }
 .venue-tag { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); display: flex; align-items: center; gap: 8px; }

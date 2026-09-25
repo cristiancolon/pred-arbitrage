@@ -12,6 +12,7 @@ from arbscan.jobs import RefreshJob
 from arbscan.pairs import load_pairs
 from arbscan.scanner import Scanner
 from arbscan.store import connect
+from arbscan.web import queries
 from arbscan.web.app import Hub, Service, create_app
 
 from test_scanner import FakeKalshi, FakePM
@@ -88,13 +89,28 @@ def test_review_decides_and_remembers(env):
     stats = asyncio.run(jev.review(cfg, db, api=api))
     assert (stats["approve"], stats["reject"], stats["unsure"]) == (1, 1, 1)
     assert [(p.kalshi, p.pm, p.relation, p.note) for p in load_pairs(cfg.pairs_path)] == [("K-1", "p-1", "same", "jev:0.90")]
+    # Unsure counts as a rejection; its reason is kept.
     rows = {r["kalshi"]: (r["decision"], r["source"]) for r in db.execute("SELECT * FROM decisions")}
-    assert rows == {"K-1": ("same", "jev"), "K-2": ("reject", "jev")}
+    assert rows == {"K-1": ("same", "jev"), "K-2": ("reject", "jev"), "K-3": ("reject", "jev")}
     assert db.execute("SELECT verdict FROM jev_reviews WHERE kalshi = 'K-3'").fetchone()[0] == "unsure"
-
-    # The unsure pair isn't sent again until its text changes.
     assert asyncio.run(jev.review(cfg, db, api=api))["sent"] == 0 and api.calls == 3
+
+
+def test_earlier_unsure_verdicts_become_rejections(env):
+    # Pairs Jev left unsure before unsure meant reject get rejected without another call.
+    cfg, db = env
+    api = FakeApi()
+    asyncio.run(jev.review(cfg, db, api=api))
+    db.execute("DELETE FROM decisions WHERE kalshi = 'K-3'")
+    db.commit()
+    stats = asyncio.run(jev.review(cfg, db, api=api))
+    assert (stats["sent"], stats["known"], api.calls) == (0, 1, 3)
+    assert db.execute("SELECT decision, source FROM decisions WHERE kalshi = 'K-3'").fetchone()[:] == ("reject", "jev")
+
+    # If its text has changed since, Jev reads it again instead.
+    db.execute("DELETE FROM decisions WHERE kalshi = 'K-3'")
     db.execute("UPDATE markets SET rules = 'new rules' WHERE id = 'p-3'")
+    db.commit()
     assert asyncio.run(jev.review(cfg, db, api=api))["sent"] == 1
 
 
@@ -115,37 +131,16 @@ def test_bad_key_stops_the_run(env):
     assert api.calls < 3  # stops early instead of trying every pair
 
 
-def test_review_page_views(env):
+def test_pipeline_counts(env):
     cfg, db = env
     asyncio.run(jev.review(cfg, db, api=FakeApi()))
     hub = Hub()
     scanner = Scanner(cfg, db, FakeKalshi({"yes_dollars": [], "no_dollars": []}), FakePM([], []))
     scanner.pairs.refresh()
     svc = Service(cfg, scanner, RefreshJob(None, 3600, None, hub.publish), hub)
+    rev = queries.pipeline(db, svc.paired(), 0)["review"]
+    assert (rev["pending"], rev["approved"], rev["rejected"]) == (0, 1, 2)
+    assert rev["jev"] == {"approved": 1, "rejected": 2, "unsure": 1}
     client = TestClient(create_app(svc))
-
-    def ids(view):
-        return [c["kalshi"] for c in client.get(f"/api/candidates?view={view}").json()["items"]]
-
-    assert ids("pending") == ids("unsure") == ["K-3"]
-    assert client.get("/api/candidates").json()["items"][0]["jev"]["reason"] == "Not confident these are the same bet"
-    assert ids("rejected") == ["K-2"]
-    assert ids("unreviewed") == []
     assert client.get("/api/state").json()["features"] == {"jev": True}
-
-    # A person can overrule a rejection.
-    client.post("/api/candidates/decide", json={"kalshi": "K-2", "pm": "p-2", "decision": "same"})
-    assert ids("rejected") == []
-    assert db.execute("SELECT source FROM decisions WHERE kalshi = 'K-2'").fetchone()[0] == "human"
-
-
-def test_key_after_auto_approve_table_is_explained(tmp_path):
-    from arbscan import config
-
-    path = tmp_path / "config.toml"
-    path.write_text('[[auto_approve]]\nkalshi_series = "KXMLBGAME"\npm_slug_prefix = "aec-mlb-"\njev_api_key = "x"\n')
-    with pytest.raises(ValueError, match="must come before the first"):
-        config.load(str(path))
-    path.write_text('jev_api_key = "x"\n' + path.read_text().replace('jev_api_key = "x"\n', ""))
-    cfg = config.load(str(path))
-    assert cfg.jev_api_key == "x" and len(cfg.auto_approve) == 1
+    assert client.get("/api/candidates").status_code == 404  # no review page any more

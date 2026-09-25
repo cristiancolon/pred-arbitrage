@@ -50,7 +50,7 @@ class Config:
     min_edge: float = 0.0
     # Your total bankroll ($), held half on each venue since each leg is paid for there.
     # Every window is sized to what that buys; 0 means unlimited (full book depth).
-    bankroll_usd: float = 500.0
+    bankroll_usd: float = 200.0
     # The dashboard's bankroll simulation takes windows in the order they appeared,
     # skipping ones open less than this long or returning less than this per year,
     # and keeps the money tied up until the market resolves...

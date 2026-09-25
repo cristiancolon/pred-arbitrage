@@ -32,7 +32,7 @@ def test_rescale_resizes_history_once(tmp_path):
 
 
 def test_fresh_database_needs_no_rescale(tmp_path):
-    cfg = Config(db_path=str(tmp_path / "f.db"))
+    cfg = Config(db_path=str(tmp_path / "f.db"), bankroll_usd=500)
     db = connect(cfg.db_path)
     assert not rescale.needed(cfg, db)
     assert db.execute("SELECT value FROM settings WHERE key = 'bankroll_usd'").fetchone()[0] == "500"

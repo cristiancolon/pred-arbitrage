@@ -32,7 +32,7 @@ min_edge = 0.0
 # the market resolves, skipping windows open less than sim_min_window_s or returning
 # less than sim_min_annualized_return a year. 0 = unlimited (full book depth).
 # Changing it re-sizes recorded history at the next start.
-bankroll_usd = 500.0
+bankroll_usd = 200.0
 sim_min_window_s = 1.0
 sim_min_annualized_return = 0.10
 sim_max_edge = 0.05             # bigger edges are usually a rules mismatch or a stale quote

@@ -17,13 +17,12 @@ function Status({ t }) {
 function LatencyTable({ latency }) {
   if (!latency) return null;
   return html`<div class="table-wrap"><table class="data">
-    <thead><tr><th>Venue</th><th class="num">Feed behind exchange</th><th class="num">Round trip to order API</th>
-      <th class="num">Order reaches the book</th><th class="num">Round trips measured</th></tr></thead>
+    <thead><tr><th></th><th class="num">Feed delay</th><th class="num">Round trip</th><th class="num">Seen → at book</th></tr></thead>
     <tbody>${["K", "P"].map((v) => {
       const l = latency[v];
-      return html`<tr><td>${VENUE[v]}</td><td class="num">${ms(l.feed_ms)}</td>
-        <td class="num">${ms(l.rtt_p50_ms)}<span class="muted"> · p90 ${ms(l.rtt_p90_ms)}</span></td>
-        <td class="num"><b>${ms(l.order_ms)}</b></td><td class="num">${int(l.samples)}</td></tr>`;
+      return html`<tr><td class="nowrap">${VENUE[v]}</td><td class="num">${ms(l.feed_ms)}</td>
+        <td class="num nowrap" title=${`median of ${l.samples} recent measurements`}>${ms(l.rtt_p50_ms)}<span class="muted"> · p90 ${ms(l.rtt_p90_ms)}</span></td>
+        <td class="num"><b>${ms(l.order_ms)}</b></td></tr>`;
     })}</tbody>
   </table></div>`;
 }
@@ -92,14 +91,13 @@ export function Paper() {
           { key: "k_title", label: "Pair", cls: "market", render: (t) => html`<${PairName} ...${t} />` },
           { key: "direction", label: "Buy", render: (t) => html`<span class="nowrap">${dirLabel(t.direction)}</span>` },
           { key: "planned_edge", label: "Edge seen", cls: "num", render: (t) => cents(t.planned_edge) },
-          { key: "planned_size", label: "Wanted", cls: "num", render: (t) => int(t.planned_size) },
-          { key: "k_qty", label: "Got K / P", cls: "num", sortable: false,
-            render: (t) => html`<span class="nowrap">${int(t.k_qty)} <span class="muted">/</span> ${int(t.p_qty)}</span>` },
+          { key: "planned_size", label: "Filled", cls: "num", title: "Contracts filled on Kalshi / Polymarket US, of the pairs wanted",
+            render: (t) => html`<span class="nowrap">${t.k_qty === t.p_qty ? int(t.k_qty) : html`${int(t.k_qty)}<span class="muted">/</span>${int(t.p_qty)}`}<span class="muted"> of ${int(t.planned_size)}</span></span>` },
           { key: "planned_profit", label: "Expected", cls: "num", render: (t) => money(t.planned_profit) },
           { key: "result", label: "Result", cls: "num", sortValue: (t) => (t.status === "settled" ? t.pnl : t.locked_profit),
             render: (t) => (t.status === "missed" ? "—" : html`<b>${money(t.status === "settled" ? t.pnl : t.locked_profit)}</b>`) },
-          { key: "k_delay_ms", label: "Latency K / P", cls: "num", sortable: false,
-            render: (t) => html`<span class="nowrap muted">${int(t.k_delay_ms)} / ${int(t.p_delay_ms)} ms</span>` },
+          { key: "k_delay_ms", label: "Latency", cls: "num", sortable: false,
+            render: (t) => html`<span class="nowrap muted" title="Kalshi / Polymarket US: decided → order at the book">${int(t.k_delay_ms)} / ${int(t.p_delay_ms)} ms</span>` },
           { key: "status", label: "", sortable: false, render: (t) => html`<${Status} t=${t} />` },
         ]} />
     <//>`;

@@ -138,14 +138,18 @@ class LiveScanner(Scanner):
     # --- feed callbacks (the hot path) --------------------------------------------
 
     def _on_kalshi(self, ticker: str) -> None:
+        book = self.kfeed.books.get(ticker)
+        seen = book.recv_ts if book is not None else None
         for p in self.by_ticker.get(ticker, ()):
-            self._evaluate(p)
-        self._lag(self.kfeed.books.get(ticker))
+            self._evaluate(p, seen)
+        self._lag(book)
 
     def _on_pm(self, slug: str) -> None:
+        book = self.pfeed.books.get(slug)
+        seen = book.recv_ts if book is not None else None
         for p in self.by_slug.get(slug, ()):
-            self._evaluate(p)
-        self._lag(self.pfeed.books.get(slug))
+            self._evaluate(p, seen)
+        self._lag(book)
 
     def _lag(self, book) -> None:
         """Exchange timestamp of the change just handled -> its pairs finished pricing."""
@@ -170,7 +174,9 @@ class LiveScanner(Scanner):
         else:
             self._on_kalshi(t)
 
-    def _evaluate(self, pair: Pair) -> None:
+    def _evaluate(self, pair: Pair, seen: float | None = None) -> None:
+        """Re-price a pair. ``seen``: when the update that triggered this arrived (None
+        when nothing new arrived, e.g. after a metadata refresh)."""
         ts = time.time()
         km = self.kmeta.get(pair.kalshi)
         kb = self.kfeed.books.get(pair.kalshi)
@@ -215,7 +221,7 @@ class LiveScanner(Scanner):
             if self.paper is not None and res.positive:
                 ep = self.episodes.open.get(key)
                 self.paper.consider(pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days,
-                                    ep.start_ts if ep else ts, max(kb.recv_ts, pb.recv_ts))
+                                    ep.start_ts if ep else ts, seen if seen is not None else ts)
 
         p_bid = round(1 - p_no[0][0], 4) if p_no else None
         p_ask = p_yes[0][0] if p_yes else None

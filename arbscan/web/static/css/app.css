@@ -322,8 +322,7 @@ table.data td:first-child, table.data th:first-child { padding-left: 18px; }
 table.data td:last-child, table.data th:last-child { padding-right: 18px; }
 .cell-2 { display: grid; }
 /* Long market names truncate instead of widening the table. */
-table.data td.market { width: 40%; max-width: 0; }
-table.data td.market .pair-name { min-width: 180px; }
+table.data td.market { width: 40%; max-width: 0; min-width: 160px; overflow: hidden; }
 .cell-2 .sub { font-size: 12px; color: var(--text-3); }
 
 /* ---------- charts ---------- */

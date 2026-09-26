@@ -3,17 +3,20 @@
 When the streaming scanner prices a pick (bankroll.PickRules), the paper trader acts
 on it like a live bot would:
 
-1. Wait until the window has been open ``pick_min_window_s``. Most windows close
-   within a few hundred milliseconds: one venue's price moves and the other venue's
-   stale quote is taken or pulled before an order from here could reach it, so
-   trading them at once mostly meant one leg filled and the other had to be unwound.
-2. Size the pair from the liquidity that stayed on both books for that whole time (a
-   level that came and went doesn't count) and the cash on each venue
-   (``bankroll_usd`` split in two, plus whatever settled trades returned there), and
-   send immediate-or-cancel limit orders at the worst price it needs on each book:
-   the ``paper_lead_venue`` leg first (Polymarket US by default, whose quotes are
-   likelier to be gone by the time an order lands), and the other leg for what that
-   filled once its report is back (or both at once, if ``paper_lead_venue`` is empty).
+1. Wait until the window has been open ``pick_min_window_s``, and until both legs'
+   best prices have held still for ``paper_quiet_s``. Most windows close within a few
+   hundred milliseconds: one venue's price moves and the other venue's stale quote is
+   taken or pulled before an order from here could reach it. And a price that has
+   just moved, even in a window that has been open a while, tends to move again
+   before the second leg arrives.
+2. Size the pair from the liquidity that stayed on both books for the last
+   ``pick_min_window_s`` (a level that came and went doesn't count) and the cash on
+   each venue (``bankroll_usd`` split in two, plus whatever settled trades returned
+   there), and send immediate-or-cancel limit orders at the worst price it needs on
+   each book: one leg first, and the other for what that filled once its report is
+   back. ``paper_lead_venue = "auto"`` leads with the leg whose price moved most
+   recently, the likelier to be gone, so a miss there costs nothing ("P" or "K" fix
+   the order, "" sends both at once).
 3. Each leg fills against that venue's live book as it stood when the order would
    have arrived (latency.LatencyModel: our decision time + half a measured round
    trip + how far the feed runs behind the exchange). Whatever others took or
@@ -134,7 +137,7 @@ class Watch:
     since: float  # when we first saw it
     due: float  # when it may next be considered for a trade
     seen: deque = field(default_factory=deque)  # (ts, Kalshi ladder, Polymarket ladder)
-    woken: float = 0.0  # the ``due`` a re-check is already scheduled for
+    woken: float = 0.0  # when the re-check already scheduled fires
 
     def add(self, ts: float, kl, pl, keep: float) -> None:
         self.seen.append((ts, kl[:WATCH_LEVELS], pl[:WATCH_LEVELS]))
@@ -285,6 +288,14 @@ class PaperTrader:
         if now < w.due:
             self._wake(pair, w, now)
             return
+        # Both legs' prices must have held still a while: a quote that just moved tends
+        # to keep moving, and the second leg arrives a few hundred ms after the first.
+        steady = {"K": self._steady("K", pair.kalshi, k_side, now), "P": self._steady("P", pair.pm, p_side, now)}
+        hold = self.cfg.paper_quiet_s - min(steady.values())
+        if hold > 0:
+            w.due = now + hold
+            self._wake(pair, w, now)
+            return
         # Each venue's money is cash plus what's tied up in open positions; one pick gets
         # at most its stake cap of that, less the longer it locks the money up.
         cap = self.rules.stake_fraction(days)
@@ -318,7 +329,8 @@ class PaperTrader:
                  "k_side": k_side, "p_side": p_side, "planned_size": n, "planned_edge": res.top_edge,
                  "planned_profit": res.profit, "planned_cost": res.cost, "k_limit": k_limit, "p_limit": p_limit,
                  "days": days, "resolve_ts": now + days * 86400 if days is not None else None,
-                 "_seen": {"K": [list(lv) for lv in kv[:BOOK_LEVELS]], "P": [list(lv) for lv in pv[:BOOK_LEVELS]]}}
+                 "_seen": {"K": [list(lv) for lv in kv[:BOOK_LEVELS]], "P": [list(lv) for lv in pv[:BOOK_LEVELS]]},
+                 "_steady": steady}
         task = asyncio.get_running_loop().create_task(
             self._execute(trade, pair.kalshi, pair.pm, k_coef, p_coef, reserve, max(0.0, now - seen_ts)))
         self.tasks.add(task)
@@ -326,10 +338,16 @@ class PaperTrader:
 
     def _wake(self, pair, w: Watch, now: float) -> None:
         """Have the scanner price the pair again when the window is next due, in case
-        neither book changes before then (once per due time)."""
-        if self.wake is not None and w.woken != w.due:
-            w.woken = w.due
-            self.wake(pair, w.due - now + 0.01)
+        neither book changes before then. A re-check already set for no later than
+        that will do: it looks again and sets another if it's still early."""
+        if self.wake is not None and not (now < w.woken <= w.due + 0.01):
+            w.woken = w.due + 0.01
+            self.wake(pair, w.woken - now)
+
+    def _steady(self, venue: str, market: str, side: str, now: float) -> float:
+        """How long this leg's best ask has been at its current price."""
+        book = (self.kbooks if venue == "K" else self.pbooks).get(market)
+        return now - book.top_ts[0 if side == "yes" else 1] if book is not None else 0.0
 
     def forget_idle(self) -> None:
         """Drop the books of windows that haven't been priced lately (they've closed)."""
@@ -357,7 +375,11 @@ class PaperTrader:
 
             met: dict = {}
             limits = {"K": t["k_limit"], "P": t["p_limit"]}
-            lead = self.cfg.paper_lead_venue if self.cfg.paper_lead_venue in VENUES else None
+            steady = t.pop("_steady")
+            lead = self.cfg.paper_lead_venue
+            if lead == "auto":  # the leg that moved most recently goes first
+                lead = "K" if steady["K"] < steady["P"] else "P"
+            lead = lead if lead in VENUES else None
 
             async def leg(v: str, qty: float, at: float) -> Fill:
                 await self._at(at)
@@ -425,7 +447,8 @@ class PaperTrader:
                     t.update(unwind_venue=long_v, unwind_qty=uw.qty,
                              unwind_loss=uw.qty * unit_long + uw.spent - uw.qty)
 
-            t["books"] = json.dumps({"seen": t.pop("_seen"), "met": met}, separators=(",", ":"))
+            t["books"] = json.dumps({"seen": t.pop("_seen"), "met": met, "lead": lead,
+                                     "steady": {v: round(x, 3) for v, x in steady.items()}}, separators=(",", ":"))
             t.update(k_qty=qty["K"], p_qty=qty["P"], k_fees=fees["K"], p_fees=fees["P"], k_hold=hold["K"],
                      p_hold=hold["P"], k_out=out["K"], p_out=out["P"],
                      locked_profit=min(hold["K"], hold["P"]) - out["K"] - out["P"])

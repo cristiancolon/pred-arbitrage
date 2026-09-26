@@ -113,22 +113,29 @@ With both venues' API keys set, the streaming scanner also **paper trades** ever
 (`paper_trading = true`; the Paper trading page). It never places an order; it acts
 the way a bot on this machine would, and fills against the live books:
 
-1. **Wait** until the window has been open `pick_min_window_s` (1 s). Most windows
-   are one venue's price moving while the other venue's stale quote is still up, and
-   that quote is taken or pulled within tens of milliseconds, well before an order
-   from here could reach it. Trading at first sight (2026-09-25, 155 trades), 72% of
+1. **Wait** until the window has been open `pick_min_window_s` (1 s) and both legs'
+   best prices have held still for `paper_quiet_s` (2 s). Most windows are one
+   venue's price moving while the other venue's stale quote is still up, and that
+   quote is taken or pulled within tens of milliseconds, well before an order from
+   here could reach it. Trading at first sight (2026-09-25, 155 trades), 72% of
    trades missed and 17 of the 43 that filled a leg had to be unwound, which cost
    $6.40 against $6.71 of planned profit. 14 of the 15 fully unwound trades were
    windows that had opened in the very update that triggered them, and the Kalshi
    price they needed was gone a median 35 ms later; our Kalshi order took 250–600 ms
-   to get there. Replayed over 25 hours of recorded quotes, waiting 1 s cuts unwinds
-   from 23% of filled trades to about 1%.
-2. **Decide** from the liquidity that stayed on both books for that whole second (a
+   to get there. Waiting for the window to be 1 s old wasn't enough on its own: in
+   the next hour 3 of 18 trades still unwound, each on a Kalshi price that had moved
+   in the last 1.3 s (a live cricket match, a gas-price market), in windows up to 34
+   minutes old, while Polymarket's side hadn't moved for minutes. Replayed over the
+   recorded quotes, requiring 2 s of stillness and leading with the leg that moved
+   last (below) cut unwinds to 0.4% of filled trades (0.7% at twice the latency).
+2. **Decide** from the liquidity that stayed on both books for the last second (a
    level that came and went doesn't count): size the pair from it and from the cash
    on each venue (`bankroll_usd` split in two, plus whatever settled trades paid out
    there), and send immediate-or-cancel limit orders at the worst price the size
-   needs: Polymarket US's leg first, and Kalshi's only for what that filled, once its
-   fill report is back (`paper_lead_venue`; `""` sends both at once).
+   needs, one leg first and the other only for what that filled, once its fill report
+   is back. `paper_lead_venue = "auto"` leads with the leg whose price moved most
+   recently: it's the likelier to be gone, and a miss on the first leg costs
+   nothing (`"P"` or `"K"` fix the order, `""` sends both at once).
 3. **Arrive** after the measured latency. Each leg fills against that venue's book as
    it stood when the order would have reached the exchange: decision time, plus half
    a round trip to the venue's order API, plus how far our feed runs behind the

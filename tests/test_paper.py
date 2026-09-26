@@ -74,6 +74,7 @@ class Harness:
     def __init__(self, tmp_path, **cfg):
         cfg.setdefault("paper_lead_venue", "")  # both legs at once unless a test says otherwise
         cfg.setdefault("pick_min_window_s", 0.0)  # trade at first sight unless a test says otherwise
+        cfg.setdefault("paper_quiet_s", 0.0)
         self.cfg = Config(db_path=str(tmp_path / "p.db"), bankroll_usd=cfg.pop("bankroll", 300), **cfg)
         self.db = connect(self.cfg.db_path)
         self.lat = LatencyModel(lambda v: [0.02] if v == "K" else [0.05], random.Random(1))
@@ -310,6 +311,62 @@ def test_a_window_not_worth_trading_on_what_stayed_is_looked_at_again(tmp_path):
     asyncio.run(run())
     t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
     assert (t["k_qty"], t["p_qty"]) == (100, 100)
+
+
+def test_a_price_that_just_moved_holds_the_trade(tmp_path):
+    h = Harness(tmp_path, paper_quiet_s=0.15)
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+    h.pbooks["p-1"].top_ts = [time.time() - 60] * 2  # Polymarket's price has sat there a minute
+
+    async def run():
+        h.offer()  # Kalshi's price is new
+        assert not h.trader.tasks and 0 < h.woken[-1][1] <= 0.16  # look again once Kalshi's price has sat 0.15 s
+        await asyncio.sleep(0.08)
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.555", "100"]]}, time.time())
+        h.kbooks["K-1"].ladders()  # the scanner prices it: Kalshi moved again
+        h.offer()
+        assert not h.trader.tasks
+        await asyncio.sleep(0.16)
+        h.offer()
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert t["k_limit"] == 0.445 and (t["k_qty"], t["p_qty"]) == (100, 100)
+    assert json.loads(t["books"])["steady"]["K"] >= 0.15
+
+
+@pytest.mark.parametrize("moved,lead", [("K", "K"), ("P", "P")])
+def test_auto_lead_sends_the_leg_that_moved_last_first(tmp_path, moved, lead):
+    h = Harness(tmp_path, paper_lead_venue="auto")
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+    still = h.kbooks["K-1"] if moved == "P" else h.pbooks["p-1"]
+    still.top_ts = [time.time() - 60] * 2
+
+    async def run():
+        h.offer()
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert json.loads(t["books"])["lead"] == lead
+    # The lead's order arrives first; the other goes out once the lead's report is back.
+    first, second = ("k_delay_ms", "p_delay_ms") if lead == "K" else ("p_delay_ms", "k_delay_ms")
+    assert t[first] < t[second]
+
+
+def test_kalshi_price_moves_are_timed_when_priced(tmp_path):
+    b = kbook({0.55: 100})
+    b.ladders()
+    t0 = b.top_ts[0]
+    b.delta({"side": "no", "price_dollars": "0.55", "delta_fp": "5"}, t0 + 5)  # more size, same price
+    b.ladders()
+    assert b.top_ts[0] == t0
+    b.delta({"side": "no", "price_dollars": "0.56", "delta_fp": "5"}, t0 + 7)  # a better offer: YES at 44c
+    b.ladders()
+    assert b.top_ts[0] == t0 + 7
 
 
 def test_bankroll_change_moves_cash(tmp_path):

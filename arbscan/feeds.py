@@ -50,7 +50,7 @@ def _complement(bids: dict[float, float]) -> list[Level]:
 
 
 class KalshiBook:
-    __slots__ = ("yes", "no", "ready", "exch_ts", "recv_ts", "stamped", "_ladders")
+    __slots__ = ("yes", "no", "ready", "exch_ts", "recv_ts", "stamped", "_ladders", "_tops", "top_ts")
 
     def __init__(self) -> None:
         self.yes: dict[float, float] = {}  # YES bids: price -> contracts
@@ -60,11 +60,14 @@ class KalshiBook:
         self.recv_ts = 0.0
         self.stamped = False  # the last change carried the exchange's own timestamp
         self._ladders: tuple[list[Level], list[Level]] | None = None
+        self._tops: tuple[float | None, float | None] = (None, None)
+        self.top_ts = [0.0, 0.0]  # when the best YES / NO ask last moved to its current price
 
     def snapshot(self, msg: dict, recv: float) -> None:
         self.yes = _levels(msg.get("yes_dollars_fp"))
         self.no = _levels(msg.get("no_dollars_fp"))
         self.ready, self.recv_ts, self.stamped, self._ladders = True, recv, False, None
+        self._tops = (None, None)  # after a (re)subscribe, count steadiness from the snapshot
 
     def delta(self, msg: dict, recv: float) -> None:
         side = self.yes if msg.get("side") == "yes" else self.no
@@ -83,11 +86,16 @@ class KalshiBook:
         """(yes_asks, no_asks): buying YES lifts NO bids and vice versa."""
         if self._ladders is None:
             self._ladders = (_complement(self.no), _complement(self.yes))
+            tops = tuple(lad[0][0] if lad else None for lad in self._ladders)
+            for i in (0, 1):
+                if tops[i] != self._tops[i]:
+                    self.top_ts[i] = self.recv_ts
+            self._tops = tops
         return self._ladders
 
 
 class PMBook:
-    __slots__ = ("yes_asks", "no_asks", "state", "ready", "exch_ts", "recv_ts", "stamped")
+    __slots__ = ("yes_asks", "no_asks", "state", "ready", "exch_ts", "recv_ts", "stamped", "top_ts")
 
     def __init__(self) -> None:
         self.yes_asks: list[Level] = []
@@ -97,9 +105,15 @@ class PMBook:
         self.exch_ts: float | None = None
         self.recv_ts = 0.0
         self.stamped = False
+        self.top_ts = [0.0, 0.0]  # when the best YES / NO ask last moved to its current price
 
     def update(self, md: dict, recv: float) -> None:
+        old = (self.yes_asks[0][0] if self.yes_asks else None, self.no_asks[0][0] if self.no_asks else None)
         self.yes_asks, self.no_asks = pmus_ladders(md)
+        new = (self.yes_asks[0][0] if self.yes_asks else None, self.no_asks[0][0] if self.no_asks else None)
+        for i in (0, 1):
+            if new[i] != old[i] or not self.ready:
+                self.top_ts[i] = recv
         self.state = md.get("state") or self.state
         self.stamped = False
         t = md.get("transactTime")

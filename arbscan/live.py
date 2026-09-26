@@ -67,7 +67,8 @@ class LiveScanner(Scanner):
         self._errors_seen = 0
         self._meta_pending = False  # pairs changed while a metadata refresh was running
         self.latency = LatencyModel(self._feed_lags)
-        self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta)
+        self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
+                                  wake=self._wake)
                       if cfg.paper_trading else None)
         self._reset_window()
 
@@ -151,6 +152,13 @@ class LiveScanner(Scanner):
             self._evaluate(p, seen)
         self._lag(book)
 
+    def _wake(self, pair: Pair, delay: float) -> None:
+        asyncio.get_running_loop().call_later(delay, self._recheck, pair)
+
+    def _recheck(self, pair: Pair) -> None:
+        if pair in self.by_ticker.get(pair.kalshi, ()):  # still watched
+            self._evaluate(pair)
+
     def _lag(self, book) -> None:
         """Exchange timestamp of the change just handled -> its pairs finished pricing."""
         if book is not None and book.stamped and book.exch_ts:
@@ -172,7 +180,8 @@ class LiveScanner(Scanner):
         if km.status in KALSHI_FINISHED:
             self._retire_finished()
         else:
-            self._on_kalshi(t)
+            for p in self.by_ticker.get(t, ()):
+                self._evaluate(p)  # the book didn't change: nothing new was seen
 
     def _evaluate(self, pair: Pair, seen: float | None = None) -> None:
         """Re-price a pair. ``seen``: when the update that triggered this arrived (None
@@ -304,6 +313,7 @@ class LiveScanner(Scanner):
                 self.paper.settle(lambda keys: lookup(self.db, keys), self.finished)
             except Exception as e:
                 log.warning("paper settlement check failed: %s", e)
+            self.paper.forget_idle()
 
     def feed_state(self) -> dict:
         return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}

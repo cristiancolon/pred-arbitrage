@@ -87,25 +87,32 @@ With both venues' API keys set, the streaming scanner also **paper trades** ever
 (`paper_trading = true`; the Paper trading page). It never places an order; it acts
 the way a bot on this machine would, and fills against the live books:
 
-1. **Decide** from the books as seen: size the pair from the cash on each venue
-   (`bankroll_usd` split in two, plus whatever settled trades paid out there), and
-   send immediate-or-cancel limit orders at the worst price the size needs:
-   Polymarket US's leg first, and Kalshi's only for what that filled, once its fill
-   report is back (`paper_lead_venue`; `""` sends both at once). In 8 minutes with
-   both at once (41 picks, 2026-09-25), 21 of the first 26 failures were a Polymarket
-   quote that had moved by the time the order landed, mostly in live games, and
-   unwinding the other leg cost $30.33 against $7.09 expected. Leading with
-   Polymarket turns those into misses that cost nothing.
-2. **Arrive** after the measured latency. Each leg fills against that venue's book as
+1. **Wait** until the window has been open `pick_min_window_s` (1 s). Most windows
+   are one venue's price moving while the other venue's stale quote is still up, and
+   that quote is taken or pulled within tens of milliseconds, well before an order
+   from here could reach it. Trading at first sight (2026-09-25, 155 trades), 72% of
+   trades missed and 17 of the 43 that filled a leg had to be unwound, which cost
+   $6.40 against $6.71 of planned profit. 14 of the 15 fully unwound trades were
+   windows that had opened in the very update that triggered them, and the Kalshi
+   price they needed was gone a median 35 ms later; our Kalshi order took 250–600 ms
+   to get there. Replayed over 25 hours of recorded quotes, waiting 1 s cuts unwinds
+   from 23% of filled trades to about 1%.
+2. **Decide** from the liquidity that stayed on both books for that whole second (a
+   level that came and went doesn't count): size the pair from it and from the cash
+   on each venue (`bankroll_usd` split in two, plus whatever settled trades paid out
+   there), and send immediate-or-cancel limit orders at the worst price the size
+   needs: Polymarket US's leg first, and Kalshi's only for what that filled, once its
+   fill report is back (`paper_lead_venue`; `""` sends both at once).
+3. **Arrive** after the measured latency. Each leg fills against that venue's book as
    it stood when the order would have reached the exchange: decision time, plus half
    a round trip to the venue's order API, plus how far our feed runs behind the
    exchange (the book we'll have *seen* by then is the one the order meets). Liquidity
    that others took or pulled in the meantime is gone, and a price that moved past
    the limit doesn't fill.
-3. **Repair** an unequal fill once both fill reports are back: buy the missing leg at
+4. **Repair** an unequal fill once both fill reports are back: buy the missing leg at
    up to break-even; if that doesn't fill, sell the extra contracts back (buy the other
    side on the same venue, which nets out), taking the loss.
-4. **Settle** when both markets publish results: each venue pays $1 per winning
+5. **Settle** when both markets publish results: each venue pays $1 per winning
    contract into its own cash, so cash drifts between venues the way it would for
    real, and a pair that wasn't really the same bet shows up as a loss.
 

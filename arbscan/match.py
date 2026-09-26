@@ -319,6 +319,63 @@ def pm_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
                r["start_ts"], r["close_ts"], market_type.startswith("drawable_outcome"))
 
 
+# Bet types that read alike but settle differently, told apart when matching Novig
+# (whose titles are built from its structured types) against the other venues.
+_EXTRA_QUALS = [
+    (re.compile(r"(?<!full[ _])games?[ _]spread|total[ _]games|more games|games? won|over [\d.]+ games"), "games"),
+    (re.compile(r"sets?[ _]spread|total[ _]sets|more sets|sets? won"), "sets"),
+    (re.compile(r"first[ _]team[ _]to[ _]score|first goal|score first|first[ _]to[ _]score"), "firstscore"),
+    (re.compile(r"both[ _]teams[ _]to[ _]score|btts"), "btts"),
+    (re.compile(r"submission|knock ?out|\bk\.?o\b|\btko\b|decision|method[ _]of|go(?:es)?[ _]the[ _]distance"
+                r"|round[ _]of[ _](?:victory|finish)"), "method"),
+]
+
+
+def extra_quals(text: str) -> frozenset[str]:
+    t = ascii_lower(text)
+    return _fs({token for pattern, token in _EXTRA_QUALS if pattern.search(t)})
+
+
+def novig_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
+    """A Novig market in Polymarket's place (indexed), to match Kalshi markets against."""
+    yes_label, no_label = r["yes_label"] or "", r["no_label"] or ""
+    yes, no = words(yes_label) - LABEL_NOISE, words(no_label) - LABEL_NOISE
+    rule = first_sentence(r["rules"])
+    head = f"{r['title']} | {yes_label}"
+    s, y = numbers(f"{head} | {rule}")
+    text = words(f"{r['title']} | {rule}") | yes | no
+
+    def arr(ws: set[str], count: bool = False) -> array:
+        return array("I", sorted(vocab.ids_for(ws, count)))
+
+    return Doc(r["id"], sys.intern(r["series"] or ""), arr(text, True), arr(yes), arr(no), line_sign(yes_label),
+               line_sign(no_label), None, None, s, y, months(head), dates(head),
+               qualifiers(head, True) | extra_quals(head), stats(text), r["start_ts"], r["close_ts"], False)
+
+
+_NOVIG_CODE = re.compile(r"\(([a-z]{2,5})\)$")  # "DET -7.5 · Detroit Lions (det)"
+_NOVIG_EVENT = re.compile(r"\s*\([^)]*\)$")  # "... @ Detroit Lions (NFL, Sep 27)"
+
+
+def novig_query_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
+    """A Novig market in Kalshi's place (streamed past an index), to match it against
+    Polymarket US. Its words must already be in ``vocab`` (from ``novig_doc``)."""
+    yes_label = r["yes_label"] or ""
+    m = _NOVIG_CODE.search(yes_label)
+    code = m.group(1) if m else None
+    head = f"{r['title']} | {yes_label}"
+    rule = first_sentence(r["rules"])
+    s, y = numbers(f"{head} | {rule}")
+    yes = words(yes_label) - LABEL_NOISE
+    text = words(f"{head} | {rule}") | yes
+    event = _NOVIG_EVENT.sub("", (r["title"] or "").split(" | ")[0])
+    opp = words(event) - yes - MONTH_ABBRS - STAT_WORDS - ({code} if code else set())
+    return Doc(r["id"], sys.intern(r["series"] or ""), vocab.ids_for(text, False), vocab.ids_for(yes, False), (),
+               line_sign(yes_label), "", vocab.ids.get(code) if code else None, vocab.ids_for(opp, False), s, y,
+               months(head), dates(head), qualifiers(head, True) | extra_quals(head), stats(text), r["start_ts"],
+               r["close_ts"], False)
+
+
 ROW_COLS = "id, series, category, title, yes_label, no_label, market_type, start_ts, close_ts, rules"
 
 
@@ -589,6 +646,60 @@ def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:
     if cfg.auto_approve:
         auto_approve(cfg, db, cands, k_series)
     return cands
+
+
+def run_novig(cfg: Config, db: sqlite3.Connection) -> list[tuple[str, Candidate]]:
+    """Suggest pairs between Novig and each of the other venues' sports markets:
+    Kalshi against an index of Novig (like Kalshi against Polymarket US), and Novig
+    against an index of Polymarket US. Returns (other venue, candidate); in a
+    candidate, ``kalshi`` is the streamed side (Kalshi, or Novig) and ``relation``
+    says whether the indexed side's YES is the streamed side's YES."""
+    t0 = time.monotonic()
+    vocab = Vocab()
+    nrows = [r for r in _rows(db, "N", quoted=False)]
+    if not nrows:
+        return []
+    ndocs = [novig_doc(r, vocab) for r in nrows]
+    queries = [novig_query_doc(r, vocab) for r in nrows]
+    pdocs = []
+    for r in _rows(db, "P"):
+        if (r["category"] or "").lower() == "sports":
+            d = pm_doc(r, vocab)
+            d.quals |= extra_quals(f"{r['title']} | {r['yes_label']} | {r['market_type']}")
+            pdocs.append(d)
+    kdocs = []
+    for r in _rows(db, "K"):
+        if (r["category"] or "").lower() == "sports":
+            d = kalshi_doc(r, vocab, count=True)
+            d.quals |= extra_quals(f"{r['title']} | {r['yes_label']}")
+            kdocs.append(_compact(d))
+    n_docs = len(ndocs) + len(pdocs) + len(kdocs)
+    log.info("matching Novig (%d markets) with %d Kalshi and %d Polymarket US sports markets",
+             len(ndocs), len(kdocs), len(pdocs))
+
+    def best(cands: list[Candidate], key) -> list[Candidate]:
+        by: dict[str, list[Candidate]] = defaultdict(list)
+        for c in cands:
+            by[key(c)].append(c)
+        return [c for cs in by.values() for c in sorted(cs, key=lambda c: -c.score)[:KEEP_PER_MARKET]]
+
+    out: list[tuple[str, Candidate]] = []
+    m = Matcher(ndocs, vocab, n_docs)
+    found = [c for d in kdocs for c in m.candidates_for(_expanded(d), cfg.match_min_score)]
+    out += [("K", c) for c in best(found, lambda c: c.pm)]
+    m = Matcher(pdocs, vocab, n_docs)
+    found = [c for q in queries for c in m.candidates_for(q, cfg.match_min_score)]
+    out += [("P", c) for c in best(found, lambda c: c.pm)]
+
+    now = time.time()
+    db.execute("DELETE FROM novig_candidates")
+    db.executemany("INSERT INTO novig_candidates VALUES (?,?,?,?,?,?,?)", [
+        (v, c.kalshi if v == "K" else c.pm, c.pm if v == "K" else c.kalshi, round(c.score, 4), c.relation,
+         int(c.confident), now) for v, c in out])
+    db.commit()
+    log.info("%d Novig candidates (%d with Kalshi) in %.0fs", len(out), sum(v == "K" for v, _ in out),
+             time.monotonic() - t0)
+    return out
 
 
 def auto_approve(cfg: Config, db: sqlite3.Connection, cands: list[Candidate], k_series: dict[str, str]) -> int:

@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from . import bankroll, catalog, config, discover, jev, match, report, rescale, review, scanner, store
+from . import bankroll, catalog, config, discover, jev, match, novig_gaps, report, rescale, review, scanner, store
 
 
 def _run(coro):
@@ -23,8 +23,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("catalog", help="download both venues' open markets for matching")
-    sub.add_parser("match", help="suggest Kalshi <-> Polymarket US pairs from the catalog")
+    sub.add_parser("catalog", help="download the venues' open markets for matching")
+    sub.add_parser("match", help="suggest Kalshi <-> Polymarket US (and Novig) pairs from the catalog")
+    ng = sub.add_parser("novig-gaps", help="sample gaps between Novig and the other venues from public books")
+    ng.add_argument("--hours", type=float, default=36.0, help="games starting within this many hours")
+    ng.add_argument("--once", action="store_true", help="one sweep, then exit")
+    ng.add_argument("--report", action="store_true", help="summarize what's been sampled instead")
     r = sub.add_parser("review", help="approve or reject suggested pairs")
     r.add_argument("--min-score", type=float, default=None)
     r.add_argument("--list", action="store_true", help="print pending candidates instead of prompting")
@@ -60,6 +64,13 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(catalog.build(cfg, db))
         elif args.cmd == "match":
             match.run(cfg, db)
+            if cfg.novig:
+                match.run_novig(cfg, db)
+        elif args.cmd == "novig-gaps":
+            if args.report:
+                novig_gaps.report(db, args.hours)
+            else:
+                asyncio.run(novig_gaps.run(cfg, db, args.hours, once=args.once))
         elif args.cmd == "review":
             min_score = cfg.match_min_score if args.min_score is None else args.min_score
             if args.list:

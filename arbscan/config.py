@@ -24,6 +24,11 @@ class Config:
 
     kalshi_base: str = "https://external-api.kalshi.com/trade-api/v2"
     pmus_base: str = "https://gateway.polymarket.us"
+    # Novig (novig.py): a sports exchange, read through its public catalog. Its public
+    # routes are throttled per IP address, so they're read gently.
+    novig: bool = True
+    novig_base: str = "https://api.novig.com"
+    novig_rps: float = 2.0
     # REST requests per second (metadata, and polling when not streaming). Both public
     # APIs sustained 20/s in testing; Polymarket US documents 20/s per IP.
     kalshi_rps: float = 15.0

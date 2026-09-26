@@ -1,4 +1,4 @@
-"""Download both venues' open markets into the ``markets`` table for matching and review.
+"""Download the venues' open markets into the ``markets`` table for matching and review.
 
 Pages are processed one at a time so memory stays flat (~100 MB peak, mostly the
 Kalshi series list) even though the raw listings are several hundred MB.
@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from .config import Config
 from .fees import kalshi_taker_coef
+from . import novig
 from .http import Api, make_client
 from .scanner import PMUS_DEFAULT_COEF, parse_ts
 from .venues import Kalshi, PolymarketUS, pm_is_open, pm_quote, pm_sides
@@ -138,3 +139,45 @@ async def build(cfg: Config, db: sqlite3.Connection) -> None:
         db.execute("DELETE FROM markets WHERE venue = 'P' AND updated < ?", (now,))
         db.commit()
         log.info("Polymarket US: %d open markets resolving within %d days", n, cfg.catalog_horizon_days)
+
+        if cfg.novig:
+            log.info("fetching Novig open markets")
+            try:
+                await build_novig(cfg, db, client)
+            except Exception as e:  # a third venue shouldn't sink the other two's refresh
+                log.warning("Novig catalog failed: %s", e)
+
+
+async def build_novig(cfg: Config, db: sqlite3.Connection, client=None) -> int:
+    """Novig's open game and prop markets (venue 'N'), with the outcome behind YES and NO."""
+    async with (make_client() if client is None else _borrowed(client)) as c:
+        nv = novig.Novig(Api(c, cfg.novig_base, cfg.novig_rps, "novig"))
+        now = time.time()
+        events = {e["eventId"]: e for e in await nv.events()}
+        horizon = now + cfg.catalog_horizon_days * 86400
+        n = 0
+        async for ms in nv.iter_markets():
+            rows = [novig.row(events[m["eventId"]], m, now) for m in ms if m.get("eventId") in events]
+            rows = [r for r in rows if r is not None and (r[0][9] is None or r[0][9] <= horizon)]
+            db.executemany(ROW_SQL, [r[0] for r in rows])
+            db.executemany("INSERT OR REPLACE INTO novig_outcomes VALUES (?,?,?,?,?)", [r[1] for r in rows])
+            db.commit()
+            n += len(rows)
+        db.execute("DELETE FROM markets WHERE venue = 'N' AND updated < ?", (now,))
+        db.execute("DELETE FROM novig_outcomes WHERE market NOT IN (SELECT id FROM markets WHERE venue = 'N')")
+        db.commit()
+        log.info("Novig: %d open markets in %d events", n, len(events))
+        return n
+
+
+class _borrowed:
+    """Use a caller's client in ``async with`` without closing it."""
+
+    def __init__(self, client):
+        self.client = client
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, *exc):
+        return False

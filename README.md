@@ -47,6 +47,32 @@ Both venues charge takers `coef × contracts × p × (1 − p)`:
 At 50¢ that is ~1.75¢ per contract on each venue, so a pair needs a gap of ~3.5¢ just
 to break even.
 
+### Novig (being added)
+
+[Novig](https://docs.novig.com) is a sports-only exchange. Its game markets charge
+takers `0.03 × p × (1 − p)` only while the game is live, so a fill before kickoff is
+free, and a Kalshi–Novig or Polymarket–Novig pair needs only ~1.75¢ to break even
+before the game. Season futures (`0.06`, always charged) are left out: they tie money
+up for months.
+
+So far arbscan reads Novig's public catalog and books, without a key:
+
+- `arbscan catalog` adds Novig's open game markets (`markets.venue = 'N'`). Each
+  Novig market has two outcomes; YES is the one the market is about ("Over", "Yes",
+  or the team or player it names), recorded in `novig_outcomes`.
+- `arbscan match` also suggests Novig pairs with both other venues
+  (`novig_candidates`), with the same hard filters as Kalshi–Polymarket plus bet
+  types that read alike but settle differently (games vs sets, method of victory,
+  first to score, both teams to score).
+- `arbscan novig-gaps` samples the gaps: for each mutual-best pair whose game starts
+  within `--hours`, it reads both books a few seconds apart and records the edge after
+  fees at $100 per venue (`novig_gaps`); `--report` summarizes. Novig limits public
+  reads to about 2 books a second per IP, so a sweep of 600 markets takes ~5 minutes.
+
+Streaming Novig's books and paper trading its pairs needs a Novig API key (see
+[Get a key](https://docs.novig.com/api/api-keys)); its holder must open the Novig app
+from a permitted state at least every 3 days or the API refuses requests.
+
 ### Sizing to your bankroll, and picks
 
 Opportunities are sized to `bankroll_usd` ($300 by default), assumed split evenly
@@ -219,6 +245,7 @@ Each stage is also a CLI command:
 .venv/bin/arbscan review               # terminal review; --list to just print
 .venv/bin/arbscan scan                 # scanner only; Ctrl-C to stop
 .venv/bin/arbscan report --hours 24
+.venv/bin/arbscan novig-gaps --hours 12 # sample Novig gaps; --once, --report
 ```
 
 `pairs.csv` can also be edited by hand; the scanner reloads it when it changes:
@@ -365,7 +392,8 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 
 | table | contents |
 |---|---|
-| `markets` | the catalog, including full rules text |
+| `markets` | the catalog, including full rules text (Novig publishes none; its row holds a summary of its structured fields) |
+| `novig_outcomes`, `novig_candidates`, `novig_gaps` | Novig: which outcome is YES, suggested pairs with the other venues, and sampled gaps |
 | `candidates`, `decisions` | matcher output and review decisions (`source`: human, rule or jev) |
 | `jev_reviews` | Jev's verdict, reason and answers for every pair it has read |
 | `paper_trades` | every simulated trade: what was planned, what filled on each venue, fees, unwinds, the books it saw and met (`books`, top 5 levels per leg), and the result |

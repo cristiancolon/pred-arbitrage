@@ -79,6 +79,49 @@ CREATE TABLE IF NOT EXISTS discovered (
 );
 CREATE INDEX IF NOT EXISTS discovered_ts ON discovered (ts);
 
+-- Novig markets' two outcomes (novig.py): which one arbscan calls YES, and whether
+-- takers pay only while the event is live (game markets) or always (futures).
+CREATE TABLE IF NOT EXISTS novig_outcomes (
+    market TEXT PRIMARY KEY,
+    event TEXT,
+    yes_outcome TEXT NOT NULL,
+    no_outcome TEXT NOT NULL,
+    fee_when_live INTEGER NOT NULL
+);
+
+-- Matcher suggestions pairing a Novig market with a Kalshi or Polymarket US one.
+CREATE TABLE IF NOT EXISTS novig_candidates (
+    venue TEXT NOT NULL,            -- the other venue: K | P
+    other TEXT NOT NULL,            -- its market (Kalshi ticker | Polymarket US slug)
+    novig TEXT NOT NULL,            -- Novig market id
+    score REAL NOT NULL,
+    relation TEXT NOT NULL,         -- 'same': Novig YES is the other market's YES; 'inverse': its NO
+    confident INTEGER NOT NULL,
+    created REAL NOT NULL,
+    PRIMARY KEY (venue, other, novig)
+);
+
+-- Sampled gaps between Novig and another venue (novig_gaps.py): both books walked at
+-- the bankroll, after fees, a few seconds apart.
+CREATE TABLE IF NOT EXISTS novig_gaps (
+    ts REAL NOT NULL,               -- when the Novig book was read
+    done_ts REAL NOT NULL,          -- when the other venue's book was in too
+    venue TEXT NOT NULL,            -- the other venue: K | P
+    other TEXT NOT NULL,
+    novig TEXT NOT NULL,
+    direction TEXT NOT NULL,        -- N:YES+O:NO etc. (O = the other venue)
+    top_edge REAL,                  -- $ per contract pair at the best prices, after fees
+    size INTEGER,
+    cost REAL,
+    profit REAL,
+    n_coef REAL,                    -- Novig's taker fee coefficient then (0 before a game starts)
+    days REAL,
+    pregame INTEGER,
+    n_book TEXT,                    -- JSON top levels bought on Novig
+    o_book TEXT                     -- and on the other venue
+);
+CREATE INDEX IF NOT EXISTS novig_gaps_ts ON novig_gaps (ts);
+
 -- Top of book per pair, written only when something changes.
 CREATE TABLE IF NOT EXISTS quotes (
     ts REAL NOT NULL,

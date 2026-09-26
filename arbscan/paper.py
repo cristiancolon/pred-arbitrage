@@ -1,22 +1,27 @@
 """Paper trading: what a bot on this machine would get, without placing any orders.
 
-When the streaming scanner prices a pick (bankroll.PickRules; the time-open rule is
-replaced by real latency here), the paper trader acts on it like a live bot would:
+When the streaming scanner prices a pick (bankroll.PickRules), the paper trader acts
+on it like a live bot would:
 
-1. Size the pair from the cash on each venue (``bankroll_usd`` split in two, plus
-   whatever settled trades returned there) and send immediate-or-cancel limit
-   orders at the worst price it needs on each book: the ``paper_lead_venue`` leg
-   first (Polymarket US by default, whose quotes are likelier to be gone by the time
-   an order lands), and the other leg for what that filled once its report is back
-   (or both at once, if ``paper_lead_venue`` is empty).
-2. Each leg fills against that venue's live book as it stood when the order would
+1. Wait until the window has been open ``pick_min_window_s``. Most windows close
+   within a few hundred milliseconds: one venue's price moves and the other venue's
+   stale quote is taken or pulled before an order from here could reach it, so
+   trading them at once mostly meant one leg filled and the other had to be unwound.
+2. Size the pair from the liquidity that stayed on both books for that whole time (a
+   level that came and went doesn't count) and the cash on each venue
+   (``bankroll_usd`` split in two, plus whatever settled trades returned there), and
+   send immediate-or-cancel limit orders at the worst price it needs on each book:
+   the ``paper_lead_venue`` leg first (Polymarket US by default, whose quotes are
+   likelier to be gone by the time an order lands), and the other leg for what that
+   filled once its report is back (or both at once, if ``paper_lead_venue`` is empty).
+3. Each leg fills against that venue's live book as it stood when the order would
    have arrived (latency.LatencyModel: our decision time + half a measured round
    trip + how far the feed runs behind the exchange). Whatever others took or
    pulled in the meantime is gone; a price that moved past the limit doesn't fill.
-3. When the fill reports are back, an unequal fill leaves some contracts unhedged.
+4. When the fill reports are back, an unequal fill leaves some contracts unhedged.
    The bot first tries to buy the missing leg at up to break-even, then sells any
    remainder back (buys the opposite side on the same venue, which nets out).
-4. Positions are held until both markets resolve; each venue then pays $1 per
+5. Positions are held until both markets resolve; each venue then pays $1 per
    winning contract into its own cash, using the venues' published results
    (results.py), so a pair that wasn't really the same bet shows up as a loss.
 
@@ -32,7 +37,7 @@ import logging
 import math
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 from . import bankroll
@@ -44,6 +49,9 @@ log = logging.getLogger(__name__)
 
 SHADOW_S = 120.0
 BOOK_LEVELS = 5  # ask levels saved with each trade, as seen and as met
+WATCH_LEVELS = 10  # ask levels remembered per book version while a window is watched
+RECHECK_S = 0.25  # an old-enough window that isn't worth trading is looked at again this often
+IDLE_WATCH_S = 60.0  # forget a window's books once it hasn't been priced for this long
 SETTLE_GRACE_S = 3600.0  # look for results this long after the expected resolution
 EPS = 1e-9
 VENUES = ("K", "P")
@@ -98,6 +106,46 @@ def limit_for(ladder, qty: float) -> float | None:
     return None
 
 
+def lasting(ladders) -> list:
+    """The liquidity every one of ``ladders`` offered: at each price, the fewest
+    contracts any of them had at that price or better. A level that came and went
+    doesn't count; one that shrank counts at its smallest."""
+    prices = sorted({p for ladder in ladders for p, _ in ladder})
+    least = [math.inf] * len(prices)
+    for ladder in ladders:
+        got, i = 0.0, 0
+        for k, p in enumerate(prices):
+            while i < len(ladder) and ladder[i][0] <= p + EPS:
+                got += ladder[i][1]
+                i += 1
+            least[k] = min(least[k], got)
+    out, prev = [], 0.0
+    for p, n in zip(prices, least):
+        if n - prev > EPS:
+            out.append((p, n - prev))
+            prev = n
+    return out
+
+
+@dataclass
+class Watch:
+    """The books one open window has shown during the last ``keep`` seconds."""
+    window: float  # the scanner's id for the window (when it opened)
+    since: float  # when we first saw it
+    due: float  # when it may next be considered for a trade
+    seen: deque = field(default_factory=deque)  # (ts, Kalshi ladder, Polymarket ladder)
+    woken: float = 0.0  # the ``due`` a re-check is already scheduled for
+
+    def add(self, ts: float, kl, pl, keep: float) -> None:
+        self.seen.append((ts, kl[:WATCH_LEVELS], pl[:WATCH_LEVELS]))
+        # Keep the version that was showing ``keep`` seconds ago and everything since.
+        while len(self.seen) > 1 and self.seen[1][0] <= ts - keep:
+            self.seen.popleft()
+
+    def lasting(self) -> tuple[list, list]:
+        return lasting([s[1] for s in self.seen]), lasting([s[2] for s in self.seen])
+
+
 def breakeven_price(coef: float, room: float) -> float:
     """Highest price p with p + fee(p) <= room: the most the missing leg can cost
     before the pair loses money."""
@@ -115,11 +163,15 @@ def _opposite(side: str) -> str:
 
 
 class PaperTrader:
-    def __init__(self, cfg, db, out, latency: LatencyModel, kbooks: dict, pbooks: dict, kmeta: dict):
+    def __init__(self, cfg, db, out, latency: LatencyModel, kbooks: dict, pbooks: dict, kmeta: dict, wake=None):
         self.cfg = cfg
         self.out = out  # DbWriter (or a connection in tests)
         self.latency = latency
         self.kbooks, self.pbooks, self.kmeta = kbooks, pbooks, kmeta
+        # wake(pair, delay): have the scanner price ``pair`` again after ``delay`` seconds,
+        # so a window that's still open once it's old enough is traded even if neither
+        # book changes in the meantime.
+        self.wake = wake
         self.rules = bankroll.PickRules.from_config(cfg)
         self.cash = {"K": 0.0, "P": 0.0}
         self.tied = {"K": 0.0, "P": 0.0}  # spent on positions not yet settled
@@ -128,6 +180,7 @@ class PaperTrader:
         self.open: dict[str, dict] = {}  # trade id -> row, positions awaiting settlement
         self.busy: set[str] = set()  # pairs with orders in flight
         self.traded: dict[tuple[str, str], float] = {}  # (pair, direction) -> window already traded
+        self.watch: dict[tuple[str, str], Watch] = {}  # (pair, direction) -> the open window's recent books
         self.hidden: dict[tuple[str, str, str], dict[float, tuple[float, float]]] = {}
         self.stats: Counter[str] = Counter()
         self.realized = 0.0  # P&L of settled trades
@@ -216,12 +269,21 @@ class PaperTrader:
 
     def consider(self, pair, label: str, k_side: str, p_side: str, kl, pl, k_coef: float, p_coef: float,
                  days: float | None, window: float, seen_ts: float, seen=None) -> None:
-        """``seen``: the scanner's own walk of these books (ArbResult), to skip non-picks early."""
+        """Called on every re-pricing of an open window (the scanner's ``window`` id).
+        ``seen``: the scanner's own walk of these books (ArbResult), to skip non-picks early."""
         key = (pair.id, label)
+        now = time.time()
+        w = self.watch.get(key)
+        if w is None or w.window != window:
+            w = self.watch[key] = Watch(window, now, now + self.rules.min_window_s)
+        w.add(now, kl, pl, self.rules.min_window_s)
         if pair.id in self.busy or self.traded.get(key) == window:
             return
         if seen is not None and self.rules.reason(seen.top_edge, math.inf, days,
                                                   bankroll.annualized(seen.profit, seen.cost, days)):
+            return
+        if now < w.due:
+            self._wake(pair, w, now)
             return
         # Each venue's money is cash plus what's tied up in open positions; one pick gets
         # at most its stake cap of that, less the longer it locks the money up.
@@ -231,13 +293,16 @@ class PaperTrader:
             self.stats["no cash"] += 1
             self.traded[key] = window
             return
+        kl, pl = w.lasting()
         kv = self._visible(kl, self._hidden("K", pair.kalshi, k_side))
         pv = self._visible(pl, self._hidden("P", pair.pm, p_side))
         res = walk(Leg(kv, k_coef), Leg(pv, p_coef), self.cfg.min_edge, budget_a=budget["K"], budget_b=budget["P"])
-        if not res.positive or res.profit < self.cfg.paper_min_profit_usd:
-            return
         rate = bankroll.annualized(res.profit, res.cost, days)
-        if self.rules.reason(res.top_edge, math.inf, days, rate):  # latency stands in for the time-open rule
+        if (not res.positive or res.profit < self.cfg.paper_min_profit_usd
+                or self.rules.reason(res.top_edge, now - w.since, days, rate)):
+            # Not worth it on what stayed put; look again shortly, as a level that came and went ages out.
+            w.due = now + RECHECK_S
+            self._wake(pair, w, now)
             return
         n = res.size
         k_limit, p_limit = limit_for(kv, n), limit_for(pv, n)
@@ -258,6 +323,19 @@ class PaperTrader:
             self._execute(trade, pair.kalshi, pair.pm, k_coef, p_coef, reserve, max(0.0, now - seen_ts)))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+
+    def _wake(self, pair, w: Watch, now: float) -> None:
+        """Have the scanner price the pair again when the window is next due, in case
+        neither book changes before then (once per due time)."""
+        if self.wake is not None and w.woken != w.due:
+            w.woken = w.due
+            self.wake(pair, w.due - now + 0.01)
+
+    def forget_idle(self) -> None:
+        """Drop the books of windows that haven't been priced lately (they've closed)."""
+        cutoff = time.time() - IDLE_WATCH_S
+        for key in [k for k, w in self.watch.items() if w.seen[-1][0] < cutoff]:
+            del self.watch[key]
 
     # --- executing ----------------------------------------------------------------------
 

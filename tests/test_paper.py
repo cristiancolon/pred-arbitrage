@@ -52,6 +52,16 @@ def test_fees_round_up_per_order():
     assert order_fee("P", 0.0695, [(0.5, 4)]) == pytest.approx(0.07)  # 6.95c -> 7c
 
 
+def test_lasting_liquidity_is_what_every_version_offered():
+    steady = [(0.45, 100)]
+    flicker = [(0.44, 5), (0.45, 100)]  # a better level that came and went
+    thinner = [(0.45, 30), (0.46, 200)]
+    assert paper.lasting([steady]) == steady
+    assert paper.lasting([steady, flicker, steady]) == [(0.45, 100)]
+    assert paper.lasting([steady, thinner]) == [(0.45, 30), (0.46, 70)]  # shrank to 30; 100 at <= 46c throughout
+    assert paper.lasting([steady, []]) == []
+
+
 def test_breakeven_price():
     p = paper.breakeven_price(0.07, 0.55)
     assert p + per_contract(0.07, p) == pytest.approx(0.55)
@@ -63,6 +73,7 @@ class Harness:
 
     def __init__(self, tmp_path, **cfg):
         cfg.setdefault("paper_lead_venue", "")  # both legs at once unless a test says otherwise
+        cfg.setdefault("pick_min_window_s", 0.0)  # trade at first sight unless a test says otherwise
         self.cfg = Config(db_path=str(tmp_path / "p.db"), bankroll_usd=cfg.pop("bankroll", 300), **cfg)
         self.db = connect(self.cfg.db_path)
         self.lat = LatencyModel(lambda v: [0.02] if v == "K" else [0.05], random.Random(1))
@@ -70,16 +81,18 @@ class Harness:
         self.lat.rtt["P"].extend([0.06])
         self.kbooks, self.pbooks = {}, {}
         self.kmeta = {"K-1": KMeta("active", time.time() + DAY / 2, 0.07)}
+        self.woken = []  # (pair, delay) re-checks the trader asked the scanner for
         self.trader = self.new_trader()
 
     def new_trader(self):
-        return paper.PaperTrader(self.cfg, self.db, self.db, self.lat, self.kbooks, self.pbooks, self.kmeta)
+        return paper.PaperTrader(self.cfg, self.db, self.db, self.lat, self.kbooks, self.pbooks, self.kmeta,
+                                 wake=lambda pair, delay: self.woken.append((pair, delay)))
 
-    def offer(self, days=0.5):
+    def offer(self, days=0.5, window=1.0):
         """YES on Kalshi at 45c and NO on Polymarket at 50c (YES bid 50c): ~1.5c after fees."""
         kl, _ = self.kbooks["K-1"].ladders()
         pl = self.pbooks["p-1"].no_asks
-        self.trader.consider(PAIR, "K:YES+P:NO", "yes", "no", kl, pl, 0.07, 0.0695, days, window=1.0,
+        self.trader.consider(PAIR, "K:YES+P:NO", "yes", "no", kl, pl, 0.07, 0.0695, days, window=window,
                              seen_ts=time.time())
 
 
@@ -203,7 +216,7 @@ def test_only_picks_are_traded_once_per_window(tmp_path):
     h.pbooks["p-1"] = pbook([(0.50, 100)])
 
     async def run():
-        h.offer(days=30)  # resolves too late to be a pick
+        h.offer(days=30, window=0.5)  # resolves too late to be a pick
         assert not h.trader.tasks
         h.offer()
         await asyncio.gather(*h.trader.tasks)
@@ -212,6 +225,91 @@ def test_only_picks_are_traded_once_per_window(tmp_path):
 
     asyncio.run(run())
     assert h.db.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0] == 1
+
+
+def test_a_window_is_traded_only_once_it_has_stayed_open(tmp_path):
+    h = Harness(tmp_path, pick_min_window_s=0.2)
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        assert not h.trader.tasks  # just opened
+        assert [(p, round(d, 2)) for p, d in h.woken] == [(PAIR, 0.21)]  # asked to look again when it's old enough
+        h.offer()
+        assert len(h.woken) == 1  # once per window
+        await asyncio.sleep(0.21)
+        h.offer()  # the re-check: still open
+        assert h.trader.tasks
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert (t["k_qty"], t["p_qty"]) == (100, 100)
+
+
+def test_a_level_that_came_and_went_is_not_counted(tmp_path):
+    h = Harness(tmp_path, pick_min_window_s=0.1)
+    h.kbooks["K-1"] = kbook({0.55: 20})  # YES 45c x 20
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"], ["0.56", "80"]]},
+                                 time.time())  # 80 more at 44c for a moment
+        h.offer()
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"]]}, time.time())
+        h.offer()
+        await asyncio.sleep(0.11)
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"], ["0.56", "80"]]},
+                                 time.time())  # back just as we look again
+        h.offer()
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert (t["planned_size"], t["k_limit"]) == (20, 0.45)  # only the 20 that stayed the whole time
+    assert (t["k_qty"], t["p_qty"], t["unwind_qty"]) == (20, 20, 0)
+
+
+def test_a_new_window_starts_the_wait_again(tmp_path):
+    h = Harness(tmp_path, pick_min_window_s=0.1)
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        await asyncio.sleep(0.11)
+        h.offer(window=2.0)  # it closed and reopened
+        assert not h.trader.tasks and len(h.woken) == 2
+
+    asyncio.run(run())
+
+
+def test_a_window_not_worth_trading_on_what_stayed_is_looked_at_again(tmp_path):
+    h = Harness(tmp_path, pick_min_window_s=0.1)
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        h.pbooks["p-1"].update({"bids": [], "state": "MARKET_STATE_OPEN"}, time.time())  # pulled for a moment
+        h.trader.watch[(PAIR.id, "K:YES+P:NO")].add(time.time(), h.kbooks["K-1"].ladders()[0], [], 0.1)
+        h.pbooks["p-1"].update({"bids": [{"px": {"value": "0.50"}, "qty": "100"}], "state": "MARKET_STATE_OPEN"},
+                               time.time())
+        await asyncio.sleep(0.11)
+        h.offer()  # old enough, but Polymarket's side didn't stay the whole time
+        assert not h.trader.tasks
+        assert round(h.woken[-1][1], 2) == 0.26  # look again once that has aged out
+        h.offer()
+        assert len(h.woken) == 2  # not before then
+        await asyncio.sleep(0.26)
+        h.offer()
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM paper_trades").fetchone())
+    assert (t["k_qty"], t["p_qty"]) == (100, 100)
 
 
 def test_bankroll_change_moves_cash(tmp_path):

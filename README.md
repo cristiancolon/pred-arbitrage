@@ -1,9 +1,10 @@
 # arbscan
 
-A read-only scanner that measures how much cross-venue arbitrage actually exists
-between **Kalshi** and **Polymarket US**. It never places orders and needs no exchange
-API keys: both venues publish market data publicly. An optional TypeSafe API key lets
-the Jev model review suggested pairs for you.
+A scanner that measures how much cross-venue arbitrage actually exists between
+**Kalshi** and **Polymarket US**. The scanner and the dashboard never place orders, and
+need no exchange API keys: both venues publish market data publicly. The only code that
+can trade is `arbscan order-test --send` ([Dry run and live orders](#dry-run-and-live-orders)).
+An optional TypeSafe API key lets the Jev model review suggested pairs for you.
 
 The point is to answer "is there money here?" with data before writing any trading code.
 
@@ -161,7 +162,9 @@ the way a bot on this machine would, and fills against the live books:
    real, and a pair that wasn't really the same bet shows up as a loss.
 
 Costs included: taker fees per order, rounded up to each venue's balance precision
-(Kalshi $0.0001, Polymarket US whole cents); slippage from walking the book and from
+(Kalshi $0.0001, Polymarket US whole cents; Polymarket US actually rounds to the
+*nearest* cent, banker's rounding, so paper overstates its fees by up to a cent an
+order); slippage from walking the book and from
 the book moving before the orders arrive; losses unwinding one-sided fills; and cash
 tied up until resolution. Our own simulated fills hide the liquidity they took for two
 minutes so it can't be taken twice. Not included: deposit and withdrawal costs and
@@ -181,6 +184,52 @@ Polymarket US 110 ms + 125 ms ≈ **180 ms**.
 
 `arbscan serve` keeps the paper account in the `paper_trades` table. Changing
 `bankroll_usd` works like a deposit or withdrawal on each venue.
+
+### Dry run and live orders
+
+`arbscan/orders.py` holds the order clients: immediate-or-cancel limit orders on
+Kalshi's V2 endpoint (`POST /portfolio/events/orders`) and Polymarket US's
+(`POST /v1/orders` on api.polymarket.us), plus balance and position reads. Both venues
+quote a market from its YES side, so buying NO at p is sent as the opposite trade in
+YES at 1 − p. An order is sent once and never retried: when the reply doesn't say what
+happened, its result is `unknown` until the order or the position is read back.
+
+**The dry run** (`dry_run = true`, on by default; `arbscan/dryrun.py`) is a second paper
+trader with its own account (`dry_trades`, `live_bankroll_usd` = $100, half a venue),
+held to the limits a first, capped live run would have:
+
+- Kalshi series with at least 20 settled pairs, none conflicting and at most 2% voided
+  (`live_series_min_settled`, `live_series_max_void`). A mismatched pair looks like an
+  arb, so it gets picked far more often than it occurs.
+- At most $10 a trade for both legs (`live_max_stake_usd`), expected to make 5¢ or more
+  (`live_min_profit_usd`), and no new trade once today's settled trades have lost $5
+  (`live_daily_loss_usd`).
+- No market the account already holds a position in (it may be one taken by hand).
+- No Kalshi market on an exchange shard without cash: Kalshi fills an order only from
+  the cash on its market's shard, and new baseball, tennis and basketball events live
+  on shard 3.
+- Nothing within a day of the Kalshi API key's location check lapsing
+  (`GET /api_keys` → `api_key_region_expiration_ts`), after which Kalshi takes no API
+  orders on sports, elections or entertainment.
+
+Every leg it simulates is also written to `live_orders` (mode `dry`) as the exact
+request the order clients would post, and Polymarket US checks each buy with its
+order preview, which validates price, size, market state and buying power without
+placing anything. Nothing is sent. The Paper trading page switches between the paper
+account and the dry run.
+
+**`arbscan order-test --venue K|P --market ID [--side yes|no|both] [--send]`** is the
+end-to-end check of real order placement. It buys one contract at the best ask and
+sells what filled straight back at the best bid (reduce-only on Kalshi). It prints
+each fill, the fees, the round trip and the cash each order moved by the venue's own
+balance. It refuses a market the account already holds, a spread over 3¢, a crossed
+book, and prices within 3¢ of 0 or 1. Without `--send` it only shows the orders, and
+Polymarket US previews them. With `--send` these are real orders: a round trip costs
+the spread plus two taker fees, a few cents.
+
+Before trading live on Polymarket US, note its Participant Agreement §19: "You shall not
+access or use the System in a live production environment unless and until you have
+received written approval to do so from Polymarket US."
 
 ### What the numbers do *not* include
 
@@ -217,7 +266,9 @@ Nothing needs a button press: new markets flow through to the scanner on their o
 - **Paper trading.** The simulated account: P&L, cash on each venue, how much of
   each pick actually filled, the latency used, and every paper trade. Settled trades
   count what their markets really paid, and the page shows how much that moved the
-  P&L from $1 a pair, with voided and mismatched trades flagged.
+  P&L from $1 a pair, with voided and mismatched trades flagged. Switch to the dry run
+  to see what a capped live run would have done, the orders it wrote out, and
+  Polymarket US's verdict on them.
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without
@@ -478,6 +529,7 @@ one starting.
 - **Real-time data.** Kalshi's and Polymarket US's WebSocket feeds need API keys.
   They're worth adding only if the report shows windows short enough that 3-second
   polling misses them.
-- **Execution.** Only once the report shows repeatable, sizeable windows. The obvious
-  first improvement is posting a maker order on one leg and taking on the other: it
-  saves one taker fee, and Polymarket US pays makers a rebate.
+- **Execution.** The order clients and the dry run exist (above); a capped live run
+  comes after the dry run and a one-contract `order-test` on each venue check out. The
+  obvious first improvement after that is posting a maker order on one leg and taking
+  on the other: it saves one taker fee, and Polymarket US pays makers a rebate.

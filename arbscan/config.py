@@ -24,9 +24,11 @@ class Config:
 
     kalshi_base: str = "https://external-api.kalshi.com/trade-api/v2"
     pmus_base: str = "https://gateway.polymarket.us"
-    # Novig (novig.py): a sports exchange, read through its public catalog. Its public
-    # routes are throttled per IP address, so they're read gently.
-    novig: bool = True
+    # Novig (novig.py): a sports exchange, read through its public catalog. Off: it
+    # added ~50 s to each hourly refresh (catalog 23 s, matching 26 s), and API keys
+    # aren't self-serve. True puts it back in the refresh; its public routes are
+    # throttled per IP address, so they're read gently.
+    novig: bool = False
     novig_base: str = "https://api.novig.com"
     novig_rps: float = 2.0
     # REST requests per second (metadata, and polling when not streaming). Both public

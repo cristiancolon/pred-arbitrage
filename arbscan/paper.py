@@ -32,6 +32,10 @@ Costs: taker fees per order, rounded up to each venue's balance precision
 (fees.order_fee), slippage from walking the book, anything lost unwinding a leg,
 and cash tied up until resolution. Our own simulated fills hide the liquidity they
 took for ``SHADOW_S`` so later trades can't take it again.
+
+The dry run (dryrun.py) is a second trader built from this one, with its own account
+and table: it takes only what a capped live run would (``guard``, ``max_stake``), and
+writes each leg it simulates as the real order a live trader would send (``orders``).
 """
 
 import asyncio
@@ -47,6 +51,7 @@ from . import bankroll
 from .arb import Leg, walk
 from .fees import order_fee, per_contract
 from .latency import LatencyModel
+from .orders import Order
 
 log = logging.getLogger(__name__)
 
@@ -166,8 +171,13 @@ def _opposite(side: str) -> str:
 
 
 class PaperTrader:
-    def __init__(self, cfg, db, out, latency: LatencyModel, kbooks: dict, pbooks: dict, kmeta: dict, wake=None):
+    def __init__(self, cfg, db, out, latency: LatencyModel, kbooks: dict, pbooks: dict, kmeta: dict, wake=None,
+                 name: str = "paper", guard=None, max_stake: float | None = None, orders=None):
         self.cfg = cfg
+        self.name, self.table = name, f"{name}_trades"
+        self.guard = guard  # guard(pair, days): why this trader won't take a pick, or None
+        self.max_stake = max_stake  # the most one trade may cost, both legs together
+        self.orders = orders  # orders.leg(trade id, Order, fill): the order each simulated leg stands for
         self.out = out  # DbWriter (or a connection in tests)
         self.latency = latency
         self.kbooks, self.pbooks, self.kmeta = kbooks, pbooks, kmeta
@@ -194,11 +204,11 @@ class PaperTrader:
 
     def _load(self, db) -> None:
         want = {v: self.cfg.bankroll_usd / 2 for v in VENUES}
-        row = db.execute("SELECT value FROM settings WHERE key = 'paper_deposits'").fetchone()
+        row = db.execute("SELECT value FROM settings WHERE key = ?", (f"{self.name}_deposits",)).fetchone()
         self.deposits = json.loads(row[0]) if row else dict(want)
         for v in VENUES:
             self.cash[v] = self.deposits[v]
-        for r in db.execute("SELECT * FROM paper_trades"):
+        for r in db.execute(f"SELECT * FROM {self.table}"):
             r = dict(r)
             for v in VENUES:
                 self.cash[v] -= r[f"{v.lower()}_out"] or 0.0
@@ -212,11 +222,12 @@ class PaperTrader:
         if row is None or self.deposits != want:
             # A changed bankroll works like a deposit or withdrawal on each venue.
             if row is not None:
-                log.info("paper account: bankroll changed; moving cash to $%g per venue deposited", want["K"])
+                log.info("%s account: bankroll changed; moving cash to $%g per venue deposited", self.name, want["K"])
             for v in VENUES:
                 self.cash[v] += want[v] - self.deposits[v]
             self.deposits = want
-            self.out.execute("INSERT OR REPLACE INTO settings VALUES ('paper_deposits', ?)", (json.dumps(want),))
+            self.out.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)",
+                             (f"{self.name}_deposits", json.dumps(want)))
             self.out.commit()
 
     def available(self, venue: str) -> float:
@@ -296,6 +307,11 @@ class PaperTrader:
             w.due = now + hold
             self._wake(pair, w, now)
             return
+        why = self.guard(pair, days) if self.guard is not None else None
+        if why:
+            self.stats[why] += 1
+            self.traded[key] = window
+            return
         # Each venue's money is cash plus what's tied up in open positions; one pick gets
         # at most its stake cap of that, less the longer it locks the money up.
         cap = self.rules.stake_fraction(days)
@@ -308,6 +324,10 @@ class PaperTrader:
         kv = self._visible(kl, self._hidden("K", pair.kalshi, k_side))
         pv = self._visible(pl, self._hidden("P", pair.pm, p_side))
         res = walk(Leg(kv, k_coef), Leg(pv, p_coef), self.cfg.min_edge, budget_a=budget["K"], budget_b=budget["P"])
+        if self.max_stake is not None and res.positive and res.cost > self.max_stake:
+            res = walk(Leg(kv, k_coef), Leg(pv, p_coef), self.cfg.min_edge,
+                       max_size=math.floor(res.size * self.max_stake / res.cost), budget_a=budget["K"],
+                       budget_b=budget["P"])
         rate = bankroll.annualized(res.profit, res.cost, days)
         if (not res.positive or res.profit < self.cfg.paper_min_profit_usd
                 or self.rules.reason(res.top_edge, now - w.since, days, rate)):
@@ -383,7 +403,9 @@ class PaperTrader:
 
             async def leg(v: str, qty: float, at: float) -> Fill:
                 await self._at(at)
-                return self._fill(v, mk[v], side[v], qty, limits[v], coef[v], reserve[v], met)
+                fill = self._fill(v, mk[v], side[v], qty, limits[v], coef[v], reserve[v], met)
+                self._order(t, v, mk[v], side[v], "buy", qty, limits[v], fill)
+                return fill
 
             if lead is None:  # both legs at once
                 fills = dict(zip(VENUES, await asyncio.gather(leg("K", t["planned_size"], t0 + d["K"].look),
@@ -426,6 +448,7 @@ class PaperTrader:
                 await self._at(t1 + ds.look)
                 chase = self._fill(short_v, mk[short_v], side[short_v], x, limit, coef[short_v],
                                    self.available(short_v))
+                self._order(t, short_v, mk[short_v], side[short_v], "buy", x, limit, chase)
                 await self._at(t1 + ds.reply)
                 self.cash[short_v] -= chase.spent
                 out[short_v] += chase.spent
@@ -440,6 +463,7 @@ class PaperTrader:
                     await self._at(time.monotonic() + dl.look)
                     # Selling what we hold needs no cash, so no budget limit here.
                     uw = self._fill(long_v, mk[long_v], _opposite(side[long_v]), x, 0.99, coef[long_v], math.inf)
+                    self._order(t, long_v, mk[long_v], side[long_v], "sell", x, 0.01, uw, sold=True)
                     self.cash[long_v] += uw.qty - uw.spent
                     out[long_v] += uw.spent - uw.qty
                     fees[long_v] += uw.fees
@@ -476,13 +500,25 @@ class PaperTrader:
         finally:
             self.busy.discard(t["pair"])
 
+    def _order(self, t: dict, v: str, market: str, side: str, action: str, qty: float, limit: float, fill: Fill,
+               sold: bool = False) -> None:
+        """Hand the order a live trader would have sent for this leg to ``orders``. A sale
+        is simulated as buying the other side, so its fill is priced in that side."""
+        if self.orders is None or qty < 1:
+            return
+        try:
+            o = Order(v, market, side, action, qty, limit, reduce_only=action == "sell")
+            self.orders.leg(t["id"], o, fill, sold)
+        except Exception:
+            log.exception("%s: recording the order for %s failed", self.name, market)
+
     COLS = ("id", "ts", "pair", "direction", "k_side", "p_side", "planned_size", "planned_edge", "planned_profit",
             "planned_cost", "k_limit", "p_limit", "k_delay_ms", "p_delay_ms", "k_qty", "p_qty", "k_fees", "p_fees",
             "unwind_venue", "unwind_qty", "unwind_loss", "k_hold", "p_hold", "k_out", "p_out", "locked_profit",
             "days", "resolve_ts", "status", "settled_ts", "payout_k", "payout_p", "pnl", "note", "books")
 
     def _write(self, t: dict) -> None:
-        self.out.execute(f"INSERT OR REPLACE INTO paper_trades ({', '.join(self.COLS)}) "
+        self.out.execute(f"INSERT OR REPLACE INTO {self.table} ({', '.join(self.COLS)}) "
                          f"VALUES ({', '.join('?' * len(self.COLS))})", tuple(t.get(c) for c in self.COLS))
 
     # --- settling -----------------------------------------------------------------------

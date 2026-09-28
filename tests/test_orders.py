@@ -48,7 +48,8 @@ def test_kalshi_writes_every_order_as_a_yes_bid_or_ask():
 
 def test_polymarket_prices_every_order_in_yes():
     b = PMTrading.body
-    cases = {("yes", "buy", 0.45): ("ORDER_INTENT_BUY_LONG", "0.45"), ("no", "buy", 0.08): ("ORDER_INTENT_BUY_SHORT", "0.92"),
+    cases = {("yes", "buy", 0.45): ("ORDER_INTENT_BUY_LONG", "0.45"),
+             ("no", "buy", 0.08): ("ORDER_INTENT_BUY_SHORT", "0.92"),
              ("yes", "sell", 0.555): ("ORDER_INTENT_SELL_LONG", "0.555"),
              ("no", "sell", 0.40): ("ORDER_INTENT_SELL_SHORT", "0.6")}
     for (side, action, limit), (intent, price) in cases.items():
@@ -118,13 +119,15 @@ def test_polymarket_fills_are_summed_and_read_back_in_the_side_bought():
     assert res.avg_price == pytest.approx(1 - (0.92 + 2 * 0.91) / 3, abs=1e-6)
     assert res.exch_ts is not None
 
-    part = {"id": "p2", "executions": [_exec("EXECUTION_TYPE_PARTIAL_FILL", 1, 0.40, 0.0, "ORDER_STATE_PARTIALLY_FILLED"),
-                                       _exec("EXECUTION_TYPE_CANCELED", state="ORDER_STATE_CANCELED")]}
+    part = {"id": "p2", "executions": [
+        _exec("EXECUTION_TYPE_PARTIAL_FILL", 1, 0.40, 0.0, "ORDER_STATE_PARTIALLY_FILLED"),
+        _exec("EXECUTION_TYPE_CANCELED", state="ORDER_STATE_CANCELED")]}
     o = Order("P", "s", "yes", "buy", 3, 0.40)
     res = PMTrading.parse(o, part, Result(o, "unknown"))
     assert (res.status, res.filled, res.avg_price) == ("partial", 1, 0.40)
 
-    rej = {"id": "p3", "executions": [{"type": "EXECUTION_TYPE_REJECTED", "orderRejectReason": "ORD_REJECT_REASON_NO_LIQUIDITY",
+    rej = {"id": "p3", "executions": [{"type": "EXECUTION_TYPE_REJECTED",
+                                       "orderRejectReason": "ORD_REJECT_REASON_NO_LIQUIDITY",
                                        "order": {"state": "ORDER_STATE_REJECTED"}}]}
     res = PMTrading.parse(o, rej, Result(o, "unknown"))
     assert res.status == "rejected" and "NO_LIQUIDITY" in res.error
@@ -235,7 +238,9 @@ def test_order_test_without_send_places_nothing(tmp_path):
 def test_record_keeps_the_request_and_reply(tmp_path):
     db = store.connect(str(tmp_path / "t.db"))
     o = Order("P", "s", "no", "buy", 1, 0.08, client_id="c1")
-    record(db, Result(o, "filled", filled=1, avg_price=0.08, fees=0.01, body=PMTrading.body(o), reply={"id": "x"}), "test")
+    res = Result(o, "filled", filled=1, avg_price=0.08, fees=0.01, body=PMTrading.body(o), reply={"id": "x"})
+    record(db, res, "test")
     r = dict(db.execute("SELECT * FROM live_orders").fetchone())
-    assert (r["id"], r["mode"], r["venue"], r["side"], r["limit_price"], r["status"]) == ("c1", "test", "P", "no", 0.08, "filled")
+    assert (r["id"], r["mode"], r["venue"], r["side"], r["limit_price"]) == ("c1", "test", "P", "no", 0.08)
+    assert r["status"] == "filled"
     assert json.loads(r["body"])["intent"] == "ORDER_INTENT_BUY_SHORT" and json.loads(r["reply"]) == {"id": "x"}

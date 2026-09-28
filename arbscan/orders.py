@@ -79,7 +79,7 @@ def _decimal(x: float) -> str:
     return f"{round(x, 4):.4f}".rstrip("0").rstrip(".")
 
 
-def _status(filled: float, qty: float) -> str:
+def status_of(filled: float, qty: float) -> str:
     return "filled" if filled >= qty - EPS else "partial" if filled > EPS else "none"
 
 
@@ -171,7 +171,7 @@ class KalshiTrading(_Venue):
             res.avg_price = _side_price(o.side, float(reply["average_fill_price"]))  # quoted as YES
         res.fees = res.filled * float(reply.get("average_fee_paid") or 0)
         res.exch_ts = reply["ts_ms"] / 1000 if reply.get("ts_ms") else None
-        res.status = _status(res.filled, o.qty)
+        res.status = status_of(res.filled, o.qty)
         return res
 
     async def balance(self) -> dict:
@@ -184,6 +184,29 @@ class KalshiTrading(_Venue):
             if p.get("ticker") == ticker:
                 return float(p.get("position_fp") or 0)
         return 0.0
+
+    async def positions(self) -> dict[str, float]:
+        """Every market the account holds contracts in: ticker -> signed position."""
+        out, cursor = {}, None
+        while True:
+            params = {"count_filter": "position", "limit": 1000} | ({"cursor": cursor} if cursor else {})
+            j = await self._get("/portfolio/positions", params)
+            for p in j.get("market_positions") or []:
+                if float(p.get("position_fp") or 0):
+                    out[p["ticker"]] = float(p["position_fp"])
+            cursor = j.get("cursor")
+            if not cursor:
+                return out
+
+    async def shard_cash(self) -> dict[int, float]:
+        """Cash per exchange shard: Kalshi only fills an order from the cash on its market's shard."""
+        b = await self.balance()
+        return {int(x.get("exchange_index") or 0): float(x["balance"]) for x in b.get("balance_breakdown") or []}
+
+    async def attested_until(self) -> float | None:
+        """When the account's location check for API keys lapses; after that Kalshi takes
+        no API orders on sports, elections or entertainment. None: never attested."""
+        return (await self._get("/api_keys")).get("api_key_region_expiration_ts")
 
     async def fills(self, order_id: str) -> list[dict]:
         return (await self._get("/portfolio/fills", {"order_id": order_id})).get("fills") or []
@@ -253,7 +276,7 @@ class PMTrading(_Venue):
         if order.get("state") == "ORDER_STATE_REJECTED" or (res.error is not None and shares <= EPS):
             res.status, res.error = "rejected", res.error or "rejected"
         elif order.get("state") in PM_DONE:
-            res.status = _status(shares, o.qty)
+            res.status = status_of(shares, o.qty)
         else:
             res.status = "unknown"  # still working when the reply came back: read the order
 
@@ -274,8 +297,22 @@ class PMTrading(_Venue):
     async def position(self, slug: str) -> float:
         """Contracts held: positive for YES, negative for NO."""
         p = ((await self._get("/v1/portfolio/positions", {"market": slug})).get("positions") or {}).get(slug)
-        if not p:
-            return 0.0
+        return self._net(p) if p else 0.0
+
+    async def positions(self) -> dict[str, float]:
+        """Every market the account holds contracts in: slug -> signed position."""
+        out, cursor = {}, None
+        while True:
+            j = await self._get("/v1/portfolio/positions", {"limit": 100} | ({"cursor": cursor} if cursor else {}))
+            for slug, p in (j.get("positions") or {}).items():
+                if self._net(p):
+                    out[slug] = self._net(p)
+            cursor = j.get("nextCursor")
+            if j.get("eof", True) or not cursor:
+                return out
+
+    @staticmethod
+    def _net(p: dict) -> float:
         return float(p.get("netPositionDecimal") or p.get("netPosition") or 0)
 
 
@@ -283,8 +320,8 @@ def record(db, res: Result, mode: str, trade: str | None = None) -> None:
     """Keep every order sent (or built, in a dry run) in ``live_orders``."""
     o = res.order
     db.execute(
-        "INSERT OR REPLACE INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, status, "
-        "filled, avg_price, fees, order_id, rtt_ms, exch_ts, error, reply, trade) "
+        "INSERT OR REPLACE INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, "
+        "status, filled, avg_price, fees, order_id, rtt_ms, exch_ts, error, reply, trade) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (o.client_id, res.sent or time.time(), mode, o.venue, o.market, o.side, o.action, o.qty, o.limit,
          json.dumps(res.body, separators=(",", ":")), res.status, res.filled, res.avg_price, res.fees, res.order_id,

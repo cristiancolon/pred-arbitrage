@@ -68,8 +68,8 @@ def show(res: Result, moved: float | None) -> str:
         sign = -1 if o.action == "buy" else 1
         expect = sign * res.avg_price * res.filled - res.fees
         cash_note = f"; cash {moved:+.4f} (expected {expect:+.4f} from price and fees)"
-    return (f"{o.action} {o.qty:g} {o.side.upper()} at <= {o.limit:.4f}: {res.status}, filled {res.filled:g} at {price}, "
-            f"fees {res.fees:.4f}, reply {res.rtt_ms:.0f} ms{lag}{cash_note}"
+    return (f"{o.action} {o.qty:g} {o.side.upper()} at <= {o.limit:.4f}: {res.status}, "
+            f"filled {res.filled:g} at {price}, fees {res.fees:.4f}, reply {res.rtt_ms:.0f} ms{lag}{cash_note}"
             + (f" [{res.error}]" if res.error else ""))
 
 

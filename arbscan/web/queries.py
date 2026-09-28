@@ -239,12 +239,14 @@ def settled_as(t: dict) -> str | None:
     return "void" if 0.001 < k < 0.999 or 0.001 < p < 0.999 else "conflict"
 
 
-def paper(db: sqlite3.Connection, hours: float) -> dict:
+def paper(db: sqlite3.Connection, hours: float, table: str = "paper_trades") -> dict:
     """Paper trades in the last ``hours`` (newest first) and totals since the account was
     last reset. ``results`` is what settling cost or added against every settled pair
-    paying $1 (its locked-in profit)."""
+    paying $1 (its locked-in profit). ``table`` "dry_trades": the dry run's instead."""
+    if table not in ("paper_trades", "dry_trades"):
+        raise ValueError(table)
     since = time.time() - hours * 3600
-    rows = [dict(r) for r in db.execute("SELECT * FROM paper_trades WHERE ts >= ? ORDER BY ts DESC", (since,))]
+    rows = [dict(r) for r in db.execute(f"SELECT * FROM {table} WHERE ts >= ? ORDER BY ts DESC", (since,))]
     names = titles(db, sorted({r["pair"] for r in rows[:300]}))
     for r in rows[:300]:
         for key, value in names.get(r["pair"], {}).items():
@@ -252,7 +254,7 @@ def paper(db: sqlite3.Connection, hours: float) -> dict:
         r["settled_as"] = settled_as(r)
     everything = [dict(r) for r in db.execute(
         "SELECT ts, status, planned_size, planned_profit, k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, "
-        "unwind_loss, locked_profit, pnl, payout_k, payout_p FROM paper_trades ORDER BY ts")]
+        f"unwind_loss, locked_profit, pnl, payout_k, payout_p FROM {table} ORDER BY ts")]
     held = [r for r in everything if settled_as(r)]
     kinds = Counter(settled_as(r) for r in held)
     traded = [r for r in everything if r["status"] != "missed"]
@@ -279,3 +281,16 @@ def paper(db: sqlite3.Connection, hours: float) -> dict:
             "pnl": total,
         },
     }
+
+
+def dry_orders(db: sqlite3.Connection) -> dict:
+    """The orders the dry run wrote out, and what Polymarket US's preview made of its buys."""
+    counts = {v: n for v, n in db.execute("SELECT venue, COUNT(*) FROM live_orders WHERE mode = 'dry' GROUP BY 1")}
+    previews = Counter()
+    for verdict, n in db.execute("SELECT preview, COUNT(*) FROM live_orders WHERE mode = 'dry' AND venue = 'P' "
+                                 "AND action = 'buy' GROUP BY 1"):
+        previews["pending" if verdict is None else "ok" if verdict == "ok" else "refused"] += n
+    refused = [dict(r) for r in db.execute(
+        "SELECT ts, market, side, limit_price, qty, preview FROM live_orders "
+        "WHERE mode = 'dry' AND preview IS NOT NULL AND preview != 'ok' ORDER BY ts DESC LIMIT 5")]
+    return {"orders": counts, "previews": dict(previews), "refused": refused}

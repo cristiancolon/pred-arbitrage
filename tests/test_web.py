@@ -152,6 +152,31 @@ def test_paper_endpoint(env):
     assert client.get("/api/state").json()["paper"] is None
 
 
+def test_the_dry_run_has_its_own_trades_and_order_log(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, status) "
+               "VALUES ('p', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 50, 'missed')", (NOW - 60,))
+    db.execute("INSERT INTO dry_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_qty, p_qty, status) "
+               "VALUES ('d', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 10, 0, 0, 'missed')", (NOW - 30,))
+    for oid, venue, action, preview in (("o1", "K", "buy", None), ("o2", "P", "buy", "ok"),
+                                        ("o3", "P", "buy", "ORD_REJECT_REASON_INVALID_PRICE_INCREMENT"),
+                                        ("o4", "P", "sell", None), ("o5", "P", "buy", None)):
+        db.execute("INSERT INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, "
+                   "trade, preview) VALUES (?, ?, 'dry', ?, 'p-1', 'no', ?, 10, 0.5, '{}', 'd', ?)",
+                   (oid, NOW - 30, venue, action, preview))
+    db.execute("INSERT INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body) "
+               "VALUES ('t1', ?, 'test', 'K', 'K-1', 'yes', 'buy', 1, 0.5, '{}')", (NOW,))
+    db.commit()
+    client = TestClient(create_app(svc))
+    data = client.get("/api/paper?hours=1&book=dry").json()
+    assert [t["id"] for t in data["trades"]] == ["d"] and data["live"] is None
+    assert data["orders"]["orders"] == {"K": 1, "P": 4}  # the order-test row isn't the dry run's
+    assert data["orders"]["previews"] == {"ok": 1, "refused": 1, "pending": 1}  # sales aren't previewed
+    assert data["orders"]["refused"][0]["preview"].endswith("INVALID_PRICE_INCREMENT")
+    assert [t["id"] for t in client.get("/api/paper?hours=1").json()["trades"]] == ["p"]
+
+
 def _trade(db, tid, ts, status, locked, pnl=None, pay=(None, None), hold=10):
     db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, planned_profit, "
                "k_qty, p_qty, k_hold, p_hold, k_out, p_out, locked_profit, status, payout_k, payout_p, pnl) "

@@ -284,9 +284,16 @@ def create_app(svc: Service) -> Starlette:
                                    request.query_params.get("view") != "all"))
 
     async def paper(request: Request) -> Response:
-        data = await svc.read(queries.paper, _float(request, "hours", 24, 0.25, 24 * 90))
-        trader = getattr(svc.scanner, "paper", None)
-        data["live"] = trader.snapshot() if trader is not None else None
+        hours = _float(request, "hours", 24, 0.25, 24 * 90)
+        if request.query_params.get("book") == "dry":  # the dry run: capped live limits, orders written out
+            data = await svc.read(queries.paper, hours, "dry_trades")
+            dry = getattr(svc.scanner, "dry", None)
+            data["live"] = dry.snapshot() if dry is not None else None
+            data["orders"] = await svc.read(queries.dry_orders)
+        else:
+            data = await svc.read(queries.paper, hours)
+            trader = getattr(svc.scanner, "paper", None)
+            data["live"] = trader.snapshot() if trader is not None else None
         data["rules"] = svc.rules.describe()
         return JSON(data)
 

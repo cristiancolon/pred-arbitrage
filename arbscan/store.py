@@ -244,7 +244,8 @@ CREATE TABLE IF NOT EXISTS live_orders (
     exch_ts REAL,                   -- when the venue says it processed the order
     error TEXT,
     reply TEXT,                     -- JSON reply
-    trade TEXT                      -- the trade this order belongs to, if any
+    trade TEXT,                     -- the trade this order belongs to, if any
+    preview TEXT                    -- dry run: Polymarket US's order preview said 'ok', or why not
 );
 CREATE INDEX IF NOT EXISTS live_orders_ts ON live_orders (ts);
 
@@ -283,6 +284,11 @@ JOIN results rp ON rp.venue = 'P' AND rp.id = substr(e.pair, instr(e.pair, '|') 
 WHERE rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
 
 """
+
+# The dry run (dryrun.py) keeps its simulated trades in a table shaped like paper_trades.
+_PAPER = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS paper_trades"):
+                SCHEMA.index("CREATE INDEX IF NOT EXISTS paper_ts")]
+SCHEMA += _PAPER.replace("paper_trades", "dry_trades") + "CREATE INDEX IF NOT EXISTS dry_ts ON dry_trades (ts);\n"
 
 
 # Views that have changed since the first release: ``connect`` replaces a stored view

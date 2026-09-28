@@ -16,7 +16,9 @@ Once a second the scanner commits to SQLite, writes a summary row to ``sweeps``,
 and notifies the dashboard, so neither slows the feed.
 
 With ``paper_trading`` on, every pick is also handed to the paper trader (paper.py),
-which simulates acting on it with this machine's measured order latency.
+which simulates acting on it with this machine's measured order latency; with
+``dry_run`` also on, to the dry-run trader too (dryrun.py), which does the same under
+the limits of a capped live run and writes out the real orders it would send.
 """
 
 import asyncio
@@ -28,10 +30,14 @@ from urllib.parse import urlparse
 
 from .arb import Leg, directions, top_edge, walk
 from .book import top_n
+from .auth import KalshiSigner, PMSigner
 from .config import Config
 from .dbwriter import DbWriter
+from .dryrun import DryRun
 from .feeds import KalshiFeed, PMFeed
+from .http import make_client
 from .latency import LatencyModel, LatencyProbe
+from .orders import KalshiTrading, PMTrading
 from .paper import PaperTrader
 from .results import UPSERT, kalshi_lifecycle_row, lookup
 from .pairs import Pair
@@ -70,6 +76,14 @@ class LiveScanner(Scanner):
         self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
                                   wake=self._wake)
                       if cfg.paper_trading else None)
+        self.dry = None
+        if cfg.paper_trading and cfg.dry_run and isinstance(kfeed.signer, KalshiSigner) \
+                and isinstance(pfeed.signer, PMSigner):
+            # Account reads and order previews only: the dry run sends no order.
+            self.http = make_client()
+            self.dry = DryRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
+                              KalshiTrading(self.http, cfg.kalshi_base, kfeed.signer),
+                              PMTrading(self.http, cfg.pmus_trade_base, pfeed.signer), wake=self._wake)
         self._reset_window()
 
     def _feed_lags(self, venue: str):
@@ -229,8 +243,11 @@ class LiveScanner(Scanner):
             self.episodes.observe(key, ts, res, days)
             if self.paper is not None and res.positive:
                 ep = self.episodes.open.get(key)
-                self.paper.consider(pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days,
-                                    ep.start_ts if ep else ts, seen if seen is not None else ts, res)
+                args = (pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days, ep.start_ts if ep else ts,
+                        seen if seen is not None else ts, res)
+                self.paper.consider(*args)
+                if self.dry is not None:
+                    self.dry.trader.consider(*args)
 
         p_bid = round(1 - p_no[0][0], 4) if p_no else None
         p_ask = p_yes[0][0] if p_yes else None
@@ -309,11 +326,14 @@ class LiveScanner(Scanner):
                 await asyncio.wait_for(stop.wait(), timeout=SETTLE_EVERY_S)
             except asyncio.TimeoutError:
                 pass
-            try:
-                self.paper.settle(lambda keys: lookup(self.db, keys), self.finished)
-            except Exception as e:
-                log.warning("paper settlement check failed: %s", e)
-            self.paper.forget_idle()
+            for trader in (self.paper, self.dry and self.dry.trader):
+                if trader is None:
+                    continue
+                try:
+                    trader.settle(lambda keys: lookup(self.db, keys), self.finished)
+                except Exception as e:
+                    log.warning("%s settlement check failed: %s", trader.name, e)
+                trader.forget_idle()
 
     def feed_state(self) -> dict:
         return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}
@@ -330,6 +350,8 @@ class LiveScanner(Scanner):
                                  self._probe_slug, self.cfg.latency_probe_s)
             tasks.append(asyncio.create_task(probe.run(stop)))
             tasks.append(asyncio.create_task(self._settle_loop(stop)))
+        if self.dry is not None:
+            tasks.append(asyncio.create_task(self.dry.run(stop)))
         try:
             await self.refresh_meta(force=True)
         except Exception as e:
@@ -366,5 +388,7 @@ class LiveScanner(Scanner):
             self.out.flush()
             log.info("saved %d open windows as cut short by the stop", n)
             await asyncio.gather(*tasks, return_exceptions=True)
+            if self.dry is not None:
+                await self.http.aclose()
             self.out.close()
             log.info("streaming scanner stopped")

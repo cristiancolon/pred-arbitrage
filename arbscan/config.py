@@ -89,6 +89,22 @@ class Config:
     # just moved tends to keep moving.
     paper_quiet_s: float = 2.0
     latency_probe_s: float = 15.0
+    # Dry run (dryrun.py): a second paper trader with the limits of a first, capped live
+    # run, in its own account of live_bankroll_usd (half on each venue). Every leg it
+    # simulates is also written out as the real order a live trader would send
+    # (live_orders), and Polymarket US checks each buy with its order preview. Nothing
+    # is sent. A pick must come from a series with at least live_series_min_settled
+    # settled pairs, none conflicting and at most live_series_max_void voided; one
+    # trade costs at most live_max_stake_usd and must be expected to make
+    # live_min_profit_usd; no new trade once today's settled trades lost
+    # live_daily_loss_usd.
+    dry_run: bool = True
+    live_bankroll_usd: float = 100.0
+    live_max_stake_usd: float = 10.0
+    live_min_profit_usd: float = 0.05
+    live_daily_loss_usd: float = 5.0
+    live_series_min_settled: int = 20
+    live_series_max_void: float = 0.02
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

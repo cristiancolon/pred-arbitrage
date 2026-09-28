@@ -53,6 +53,7 @@ class KMeta:
     status: str
     resolve_ts: float | None
     fee_coef: float
+    shard: int = 0  # the Kalshi exchange shard it trades on, which needs its own cash
 
 
 @dataclass
@@ -239,7 +240,7 @@ class Scanner:
                 continue
             fee = known_fee[t] if t in known_fee else self.series_fee[self.event_series[m["event_ticker"]]]
             resolve = parse_ts(m.get("expected_expiration_time")) or parse_ts(m.get("close_time"))
-            self.kmeta[t] = KMeta(m.get("status") or "", resolve, fee)
+            self.kmeta[t] = KMeta(m.get("status") or "", resolve, fee, m.get("exchange_index") or 0)
         self.meta_ts = time.monotonic()
 
     async def _refresh_meta_bg(self, tickers: list[str]) -> None:

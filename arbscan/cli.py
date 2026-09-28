@@ -18,7 +18,7 @@ def _run(coro):
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="arbscan", description="Read-only Kalshi <-> Polymarket US arbitrage scanner.")
+    ap = argparse.ArgumentParser(prog="arbscan", description="Kalshi <-> Polymarket US arbitrage scanner. Read-only, except order-test --send.")
     ap.add_argument("-c", "--config", help="TOML config file (default: ./config.toml if present)")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -45,6 +45,12 @@ def main(argv: list[str] | None = None) -> None:
     sv.add_argument("--port", type=int, help="dashboard port (default from config: 8787)")
     sv.add_argument("--no-scanner", action="store_true", help="dashboard and refresh job only")
     sub.add_parser("rescale", help="re-size recorded opportunities for the configured bankroll")
+    ot = sub.add_parser("order-test", help="buy one contract and sell it straight back, to test live orders "
+                                           "(real orders with --send)")
+    ot.add_argument("--venue", choices=["K", "P"], required=True, help="K (Kalshi) or P (Polymarket US)")
+    ot.add_argument("--market", required=True, help="Kalshi ticker or Polymarket US slug")
+    ot.add_argument("--side", choices=["yes", "no", "both"], default="both")
+    ot.add_argument("--send", action="store_true", help="place the orders (default: only show them)")
     rp = sub.add_parser("report", help="summarize what the scanner found")
     rp.add_argument("--hours", type=float, default=24.0)
     rp.add_argument("--min-profit", type=float, default=0.0, help="ignore windows below this $ profit")
@@ -93,6 +99,11 @@ def main(argv: list[str] | None = None) -> None:
 
             cfg = replace(cfg, web_host=args.host or cfg.web_host, web_port=args.port or cfg.web_port)
             _run(serve(cfg, args.config, db, run_scanner=not args.no_scanner))
+        elif args.cmd == "order-test":
+            from . import ordertest
+
+            sides = ["yes", "no"] if args.side == "both" else [args.side]
+            asyncio.run(ordertest.run(cfg, db, args.venue, args.market, sides, args.send))
         elif args.cmd == "report":
             report.run(db, args.hours, args.min_profit, args.top, cfg.bankroll_usd,
                        bankroll.PickRules.from_config(cfg))

@@ -46,6 +46,8 @@ class Config:
     pmus_secret_key: str = ""
     kalshi_ws_url: str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
     pmus_ws_url: str = "wss://api.polymarket.us/v1/ws/markets"
+    # Polymarket US takes orders on this host; pmus_base is its public, read-only API.
+    pmus_trade_base: str = "https://api.polymarket.us"
 
     # Polling (no keys): start a new sweep this long after the previous one started.
     poll_interval_s: float = 1.0

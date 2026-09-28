@@ -222,6 +222,32 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 CREATE INDEX IF NOT EXISTS paper_ts ON paper_trades (ts);
 CREATE INDEX IF NOT EXISTS paper_status ON paper_trades (status);
 
+-- Orders sent to a venue (orders.py), or built without sending in a dry run. Unlike
+-- paper_trades, rows with mode 'test' or 'live' are real orders.
+CREATE TABLE IF NOT EXISTS live_orders (
+    id TEXT PRIMARY KEY,            -- our client order id
+    ts REAL NOT NULL,               -- when it was sent (or built)
+    mode TEXT NOT NULL,             -- test (arbscan order-test) | dry | live
+    venue TEXT NOT NULL,            -- K | P
+    market TEXT NOT NULL,
+    side TEXT NOT NULL,             -- yes | no: the outcome bought or sold
+    action TEXT NOT NULL,           -- buy | sell
+    qty REAL NOT NULL,
+    limit_price REAL NOT NULL,      -- the worst price accepted for `side`
+    body TEXT NOT NULL,             -- JSON request, as sent
+    status TEXT,                    -- filled | partial | none | rejected | unknown
+    filled REAL,
+    avg_price REAL,                 -- average price of `side`
+    fees REAL,
+    order_id TEXT,                  -- the venue's order id
+    rtt_ms REAL,
+    exch_ts REAL,                   -- when the venue says it processed the order
+    error TEXT,
+    reply TEXT,                     -- JSON reply
+    trade TEXT                      -- the trade this order belongs to, if any
+);
+CREATE INDEX IF NOT EXISTS live_orders_ts ON live_orders (ts);
+
 -- How each market we've paired settled (results.py): what one YES contract paid.
 CREATE TABLE IF NOT EXISTS results (
     venue TEXT NOT NULL,            -- K | P

@@ -179,3 +179,121 @@ def test_auto_approve(db, tmp_path):
     # Decisions are remembered, so a second run adds nothing.
     match.run(cfg, db)
     assert len(load_pairs(str(pairs))) == 1
+
+
+# --- look-alike bets and games that move after pairing ---------------------------
+
+def _catalog(tmp_path, rows, name="c.db"):
+    """The markets above (so words get realistic IDF weights) plus ``rows``."""
+    d = build_catalog(str(tmp_path / name))
+    d.executemany(ROW_SQL, rows)
+    d.commit()
+    return d
+
+
+def _pairs(db, tmp_path, only: str):
+    """Suggested pairs whose Kalshi ticker starts with ``only``."""
+    cfg = Config(pairs_path=str(tmp_path / "pairs.csv"), match_min_score=0.2)
+    return cfg, {(c.kalshi, c.pm): c.relation for c in match.run(cfg, db) if c.kalshi.startswith(only)}
+
+
+def test_a_game_spread_is_not_a_set_spread(tmp_path):
+    title = ("Will the Adolfo Daniel Vallejo cover -1.5 vs the Taro Daniel in Adolfo Daniel Vallejo vs. "
+             "Taro Daniel?")
+    rules = "This market settles Yes if Adolfo Daniel Vallejo covers -1.5 against Taro Daniel."
+    db = _catalog(tmp_path, [
+        _k("KXATPGSPREAD-26SEP27VALDAN-VAL2", "Adolfo Daniel Vallejo vs Taro Daniel: Game Spread | Adolfo Daniel "
+           "Vallejo vs Taro Daniel (Sep 27) | Will Adolfo Daniel Vallejo win at least 1.5 more games than Taro Daniel?",
+           "Adolfo Daniel Vallejo -1.5 games", "If Adolfo Daniel Vallejo wins at least 1.5 more games than Taro "
+           "Daniel, then the market resolves to Yes."),
+        # Polymarket US words both the same way; only the market type and slug differ.
+        _p("asc-atp-adoval-tardan-2026-09-27-gs-neg-1pt5", title, "-1.50 · Adolfo Daniel Vallejo (adoval)",
+           "+1.50 · Taro Daniel (tardan)", rules, "spreads/tennis_match_games_spread"),
+        _p("asc-atp-adoval-tardan-2026-09-27-ss-neg-1pt5", title, "-1.50 · Adolfo Daniel Vallejo (adoval)",
+           "+1.50 · Taro Daniel (tardan)", rules, "spreads/tennis_match_sets_spread"),
+    ])
+    _, got = _pairs(db, tmp_path, "KXATP")
+    assert got == {("KXATPGSPREAD-26SEP27VALDAN-VAL2", "asc-atp-adoval-tardan-2026-09-27-gs-neg-1pt5"): "same"}
+
+
+GAME_2 = kalshi_start_ts("KXMLBGAME-26SEP251905BALNYY")  # 2026-09-25 19:05 ET, from the ticker
+
+
+def _bal(start=GAME_2):
+    return _k("KXMLBGAME-26SEP251905BALNYY-BAL", "Baltimore vs New York Y | BAL vs NYY (Sep 25) | Baltimore wins",
+              "Baltimore", "If Baltimore wins the Baltimore vs New York Y professional baseball game originally "
+              "scheduled for Sep 25, 2026, then the market resolves to Yes.", start=start)
+
+
+def _bal_pm(start):
+    return _p("aec-mlb-bal-nyy-2026-09-25", "Who will win in the upcoming baseball event Baltimore Orioles vs "
+              "New York Yankees scheduled for September 25, 2026?", "Baltimore Orioles (bal)",
+              "New York Yankees (nyy)", "This market will settle to the winner of the Baltimore Orioles vs "
+              "New York Yankees MLB game.", "moneyline/baseball_team_full_game_winner", start=start)
+
+
+def test_doubleheader_games_are_told_apart_by_start_time(tmp_path):
+    _, got = _pairs(_catalog(tmp_path, [_bal(), _bal_pm(GAME_2)]), tmp_path, "KXMLBGAME-26SEP25")
+    assert got == {("KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25"): "same"}
+    # Game 1, three hours earlier, is another game.
+    _, got = _pairs(_catalog(tmp_path, [_bal(), _bal_pm(GAME_2 - 3 * 3600)], "g1.db"), tmp_path, "KXMLBGAME-26SEP25")
+    assert got == {}
+
+
+def test_esports_start_times_are_rough(tmp_path):
+    start = kalshi_start_ts("KXLOLGAME-26SEP290400MASKSA")
+    db = _catalog(tmp_path, [
+        _k("KXLOLGAME-26SEP290400MASKSA-KSA", "Malaysia vs Saudi Arabia | MAS vs KSA (Sep 29) | Saudi Arabia wins",
+           "Saudi Arabia", "If Saudi Arabia wins the Malaysia vs Saudi Arabia League of Legends match, then the "
+           "market resolves to Yes.", start=start),
+        _p("aec-lol-ksa-mal-2026-09-29", "Who will win the League of Legends match Saudi Arabia vs Malaysia?",
+           "Saudi Arabia (ksa)", "Malaysia (mal)", "This market will settle to the winner of the match.",
+           "moneyline/esports_match_winner", start=start - 3 * 3600),
+    ])
+    _, got = _pairs(db, tmp_path, "KXLOL")
+    assert got == {("KXLOLGAME-26SEP290400MASKSA-KSA", "aec-lol-ksa-mal-2026-09-29"): "same"}
+
+
+def test_recheck_unpairs_a_game_that_moved(tmp_path):
+    from arbscan.pairs import load_pairs
+    from arbscan.review import decide
+
+    db = _catalog(tmp_path, [_bal(), _bal_pm(GAME_2)])
+    cfg, _ = _pairs(db, tmp_path, "KXMLBGAME-26SEP25")
+    decide(cfg, db, "KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25", "same", source="jev")
+    # Rewording the labels doesn't unpair it: the heuristics can't confirm it, but nothing factual changed.
+    db.execute("UPDATE markets SET yes_label = 'Orioles', no_label = 'Yankees' WHERE id = 'aec-mlb-bal-nyy-2026-09-25'")
+    match.run(cfg, db)
+    assert len(load_pairs(cfg.pairs_path)) == 1
+    # Polymarket US moves its market to game 1 of a doubleheader, three hours earlier.
+    db.execute("UPDATE markets SET start_ts = start_ts - 3 * 3600 WHERE id = 'aec-mlb-bal-nyy-2026-09-25'")
+    match.run(cfg, db)
+    assert load_pairs(cfg.pairs_path) == []
+    assert tuple(db.execute("SELECT decision, source, note FROM decisions").fetchone()) == \
+        ("reject", "recheck", "start times 3.0h apart")
+
+
+def test_recheck_unpairs_a_game_retitled_game_2(tmp_path):
+    from arbscan.pairs import load_pairs
+    from arbscan.review import decide
+
+    db = _catalog(tmp_path, [_bal(), _bal_pm(GAME_2)])
+    cfg, _ = _pairs(db, tmp_path, "KXMLBGAME-26SEP25")
+    decide(cfg, db, "KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25", "same", source="jev")
+    db.execute("UPDATE markets SET title = 'Baltimore vs New York Y (Game 2) | BAL vs NYY (Sep 25, Game 2) | "
+               "Baltimore wins' WHERE id = 'KXMLBGAME-26SEP251905BALNYY-BAL'")
+    match.run(cfg, db)
+    assert load_pairs(cfg.pairs_path) == []
+    assert db.execute("SELECT note FROM decisions").fetchone()[0] == "qualifiers differ (game2)"
+
+
+def test_a_persons_approval_stands(tmp_path):
+    from arbscan.pairs import load_pairs
+    from arbscan.review import decide
+
+    db = _catalog(tmp_path, [_bal(), _bal_pm(GAME_2)])
+    cfg, _ = _pairs(db, tmp_path, "KXMLBGAME-26SEP25")
+    decide(cfg, db, "KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25", "same", source="human")
+    db.execute("UPDATE markets SET start_ts = start_ts - 3 * 3600 WHERE id = 'aec-mlb-bal-nyy-2026-09-25'")
+    match.run(cfg, db)
+    assert len(load_pairs(cfg.pairs_path)) == 1

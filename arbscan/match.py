@@ -11,13 +11,22 @@ Hard filters (any mismatch rejects the candidate):
     20), stage (qualify, finalist, make the cut), draws/ties, exact scores, district
     codes (MI-04), and for sports the bet type (spread / total / team total);
   * stat words (passing touchdowns vs touchdowns vs completions);
-  * game start times within 12 hours;
+  * game start times within 12 hours, or within an hour when Kalshi's ticker gives
+    the scheduled start (not for esports, whose start times are rough): a
+    doubleheader's two games are hours apart on the same day;
+  * spread and total units: games vs sets (a tennis game spread and set spread both
+    read "cover 1.5");
   * outcome labels: Kalshi's YES subject must line up with one Polymarket side. That
     side decides the relation: "same" (Polymarket YES == Kalshi YES) or "inverse"
     (Polymarket YES == Kalshi NO, e.g. Kalshi "Atlanta wins" vs a Reds/Braves
     moneyline whose long side is the Reds). Spread signs must agree too.
 Soft score: IDF-weighted cosine similarity of the words in titles, outcome labels
 and the first sentence of the rules, scaled down for timing distance.
+
+Approved pairs are checked again on every run (``recheck``): venues retitle and
+reschedule markets after we've paired them (a game becomes "Game 2" of a
+doubleheader and moves three hours), and a pair that no longer passes the hard
+filters is taken out of pairs.csv.
 """
 
 import logging
@@ -32,8 +41,9 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
+from .catalog import kalshi_start_ts
 from .config import Config
-from .pairs import append_pair
+from .pairs import Pair, append_pair, load_pairs, remove_pairs
 from .review import record
 
 log = logging.getLogger(__name__)
@@ -103,6 +113,11 @@ _SIGNED_LINE = re.compile(r"(?:^|\s)([+-])\d")  # "-1.50 · Reds" / "Pittsburgh 
 _DATE = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b")
 
 START_WINDOW_S = 12 * 3600
+# When Kalshi's ticker gives the scheduled start (KXMLBGAME-26SEP251905BALNYY), it
+# and Polymarket's gameStartTime agree to the minute for the same game (337 of 341
+# approved pairs at 0, the rest within 30 minutes); a doubleheader's other game
+# is 3+ hours away.
+EXACT_START_WINDOW_S = 3600
 # Words in more markets than this ("sep", "football", "st") say nothing about who is
 # playing, so they don't count as the opponent.
 OPPONENT_MAX_DF = 10000
@@ -268,6 +283,8 @@ class Doc:
     close: float | None
     drawable: bool
     norm: float = 0.0
+    # How far apart the two start times may be; a pair uses the wider of its two docs'.
+    start_window: float = START_WINDOW_S
 
 
 def kalshi_doc(r: sqlite3.Row, vocab: Vocab, count: bool) -> Doc:
@@ -286,12 +303,14 @@ def kalshi_doc(r: sqlite3.Row, vocab: Vocab, count: bool) -> Doc:
     event = " | ".join((r["title"] or "").split(" | ")[:2])
     opp = words(event) - yes - MONTH_ABBRS - STAT_WORDS - {suffix}
     sports = (r["category"] or "").lower() == "sports"
-    q = qualifiers(head, sports)
+    q = qualifiers(head, sports) | (unit_quals(head) if sports else EMPTY)
     if _EXCLUSION.search(ascii_lower(rule)):
         q = q | {"excludes"}
+    exact = r["start_ts"] is not None and r["start_ts"] == kalshi_start_ts(r["id"])
     return Doc(r["id"], sys.intern(r["series"] or ""), text_ids, vocab.ids_for(yes, False), (),
                line_sign(yes_label), "", code, vocab.ids_for(opp, False), s, y, months(head), dates(head), q, stats(text),
-               r["start_ts"], r["close_ts"], False)
+               r["start_ts"], r["close_ts"], False,
+               start_window=EXACT_START_WINDOW_S if exact else START_WINDOW_S)
 
 
 def pm_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
@@ -306,7 +325,8 @@ def pm_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
     s, y = numbers(f"{r['title']} | {yes_label} | {rule}")
     text = words(f"{r['title']} | {rule} | {slug_text}") | yes | no
     sports = (r["category"] or "").lower() == "sports"
-    q = qualifiers(f"{r['title']} | {yes_label} | {slug_text} | {market_type}", sports)
+    about = f"{r['title']} | {yes_label} | {slug_text} | {market_type}"
+    q = qualifiers(about, sports) | (unit_quals(about) if sports else EMPTY)
     if _EXCLUSION.search(ascii_lower(rule)):
         q |= {"excludes"}
 
@@ -316,14 +336,20 @@ def pm_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
     head = f"{r['title']} | {yes_label}"
     return Doc(slug, slug.split("-", 1)[0], arr(text, True), arr(yes), arr(no), line_sign(yes_label),
                line_sign(no_label), None, None, s, y, months(head), dates(head), q, stats(text),
-               r["start_ts"], r["close_ts"], market_type.startswith("drawable_outcome"))
+               r["start_ts"], r["close_ts"], market_type.startswith("drawable_outcome"),
+               start_window=START_WINDOW_S if "esports" in market_type else 0.0)
 
 
+# What a spread or total counts, when the question doesn't say: Polymarket US's tennis
+# game and set spreads are both "Will X cover 1.5 vs Y?" (only the market type and
+# slug tell them apart), and Kalshi's reads "win at least 1.5 more games".
+_UNIT_QUALS = [
+    (re.compile(r"(?<!full[ _])games?[ _]spread|total[ _]games|more games|games? won|over [\d.]+ games"), "games"),
+    (re.compile(r"sets?[ _]spread|total[ _]sets|more sets|sets? won|over [\d.]+ sets"), "sets"),
+]
 # Bet types that read alike but settle differently, told apart when matching Novig
 # (whose titles are built from its structured types) against the other venues.
-_EXTRA_QUALS = [
-    (re.compile(r"(?<!full[ _])games?[ _]spread|total[ _]games|more games|games? won|over [\d.]+ games"), "games"),
-    (re.compile(r"sets?[ _]spread|total[ _]sets|more sets|sets? won"), "sets"),
+_EXTRA_QUALS = _UNIT_QUALS + [
     (re.compile(r"first[ _]team[ _]to[ _]score|first goal|score first|first[ _]to[ _]score"), "firstscore"),
     (re.compile(r"both[ _]teams[ _]to[ _]score|btts"), "btts"),
     (re.compile(r"submission|knock ?out|\bk\.?o\b|\btko\b|decision|method[ _]of|go(?:es)?[ _]the[ _]distance"
@@ -331,9 +357,17 @@ _EXTRA_QUALS = [
 ]
 
 
-def extra_quals(text: str) -> frozenset[str]:
+def _quals_from(patterns, text: str) -> frozenset[str]:
     t = ascii_lower(text)
-    return _fs({token for pattern, token in _EXTRA_QUALS if pattern.search(t)})
+    return _fs({token for pattern, token in patterns if pattern.search(t)})
+
+
+def unit_quals(text: str) -> frozenset[str]:
+    return _quals_from(_UNIT_QUALS, text)
+
+
+def extra_quals(text: str) -> frozenset[str]:
+    return _quals_from(_EXTRA_QUALS, text)
 
 
 def novig_doc(r: sqlite3.Row, vocab: Vocab) -> Doc:
@@ -402,6 +436,7 @@ class Matcher:
 
     def __init__(self, pm: list[Doc], vocab: Vocab, n_docs: int):
         self.p = pm
+        self.reason, self.structural = "", True
         self.df = vocab.df
         self.idf = array("d", (math.log(n_docs / c) if c else 0.0 for c in vocab.df))
         p_df: Counter[int] = Counter()
@@ -439,49 +474,60 @@ class Matcher:
         opp = {t for t in k.opp if df[t] <= OPPONENT_MAX_DF}
         return not opp or any(t in opp for t in p.words)
 
+    def _no(self, reason: str, structural: bool = True) -> None:
+        """Reject; ``structural`` when the markets differ in a fact (line, segment,
+        unit, stat, date, start time) rather than in how their labels are worded."""
+        self.reason, self.structural = reason, structural
+        return None
+
     def score(self, k: Doc, p: Doc) -> Candidate | None:
-        """``k`` holds Python sets (fast membership), ``p`` holds arrays."""
-        if k.strikes != p.strikes or k.quals != p.quals or k.stats != p.stats:
-            return None
+        """``k`` holds Python sets (fast membership), ``p`` holds arrays. When the
+        pair fails a hard filter, ``self.reason`` says which."""
+        if k.strikes != p.strikes:
+            return self._no("different lines or thresholds")
+        if k.quals != p.quals:
+            return self._no(f"qualifiers differ ({', '.join(sorted(k.quals ^ p.quals))})")
+        if k.stats != p.stats:
+            return self._no("different stats")
         if k.years and p.years and not (k.years & p.years):
-            return None
+            return self._no("different years")
         if k.months and p.months and not (k.months & p.months):
-            return None
+            return self._no("different months")
         game = k.start is not None and p.start is not None
         time_factor = 1.0
         if game:
             dt = abs(k.start - p.start)
-            if dt > START_WINDOW_S:
-                return None
+            if dt > max(k.start_window, p.start_window):
+                return self._no(f"start times {dt / 3600:.1f}h apart")
             time_factor = 1.0 - 0.5 * dt / START_WINDOW_S
         elif k.dates and p.dates and not (k.dates & p.dates):
             # Games are checked by start time instead: a late ET game has a
             # different UTC date on one venue.
-            return None
+            return self._no("different dates")
         elif k.close is not None and p.close is not None:
             days = abs(k.close - p.close) / 86400
             if days > CLOSE_WINDOW_DAYS:
-                return None
+                return self._no("close dates too far apart")
             time_factor = 1.0 - 0.5 * max(0.0, days - 14) / CLOSE_WINDOW_DAYS
 
         if (k.yes or k.code is not None) and (p.yes or p.no):
             m_same = self.side_match(k, p.yes, p.yes_sign)
             m_inv = self.side_match(k, p.no, p.no_sign)
             if max(m_same, m_inv) < LABEL_MIN_COVERAGE:
-                return None  # labels name different things (e.g. different teams)
+                return self._no("outcome labels name different things", structural=False)
             if m_inv > m_same:
                 if p.drawable:
-                    return None  # with a draw possible, "A loses" is not "B wins"
+                    return self._no("draw possible, so a loss isn't the other side's win", structural=False)
                 relation = "inverse"
             else:
                 relation = "same"
             if game and not self.opponent_agrees(k, p):
-                return None
+                return self._no("different opponent", structural=False)
             confident = True
         else:
             # Polymarket gives no subject; Kalshi's YES subject must be in its text.
             if k.yes and self.coverage(k.yes, set(p.words)) < LABEL_MIN_COVERAGE:
-                return None
+                return self._no("Kalshi's subject isn't in Polymarket's text", structural=False)
             relation, confident = "same", False
 
         shared = sum(self.idf[t] for t in p.words if t in k.words)
@@ -615,6 +661,9 @@ def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:
         raise SystemExit("catalog is empty; run `arbscan catalog` first")
     log.info("matching %d Kalshi x %d Polymarket US markets with quotes", len(kdocs), len(pm))
     m = Matcher(pm, vocab, len(kdocs) + len(pm))
+    approved = _approved(cfg, db)
+    p_by_id = {d.id: d for d in pm} if approved else {}
+    stale: list[tuple[Pair, str]] = []
     cands: list[Candidate] = []
     k_series: dict[str, str] = {}
     for i in range(len(kdocs)):
@@ -625,7 +674,13 @@ def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:
         if found:
             cands.extend(found)
             k_series[d.id] = d.series
-    del m, pm, kdocs
+        for pair in approved.get(d.id, ()):
+            p = p_by_id.get(pair.pm)
+            why = recheck(m, d, p, pair.relation) if p is not None else None
+            if why:
+                stale.append((pair, why))
+    del m, pm, kdocs, p_by_id
+    revoke(cfg, db, stale)
 
     # Keep at most KEEP_PER_MARKET per Polymarket market too.
     by_p: dict[str, list[Candidate]] = defaultdict(list)
@@ -646,6 +701,47 @@ def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:
     if cfg.auto_approve:
         auto_approve(cfg, db, cands, k_series)
     return cands
+
+
+def _approved(cfg: Config, db: sqlite3.Connection) -> dict[str, list[Pair]]:
+    """Pairs in pairs.csv that Jev or an auto-approve rule approved, by Kalshi ticker.
+    A person's approval stands."""
+    auto = {(r[0], r[1]) for r in db.execute(
+        "SELECT kalshi, pm FROM decisions WHERE decision IN ('same', 'inverse') AND source IN ('jev', 'rule')")}
+    out: dict[str, list[Pair]] = defaultdict(list)
+    for p in load_pairs(cfg.pairs_path):
+        if (p.kalshi, p.pm) in auto:
+            out[p.kalshi].append(p)
+    return out
+
+
+def recheck(m: Matcher, k: Doc, p: Doc, relation: str) -> str | None:
+    """Why an approved pair no longer holds up, or None if it still does. Only facts
+    count: venues reword labels after listing ("Yes · ncst" -> "Yes · NC State"),
+    which can leave the label heuristics unable to confirm a pair that's still right."""
+    c = m.score(k, p)
+    if c is None:
+        return m.reason if m.structural else None
+    if c.confident and c.relation != relation:
+        return f"labels now line up as {c.relation}, not {relation}"
+    return None
+
+
+def revoke(cfg: Config, db: sqlite3.Connection, stale: list[tuple[Pair, str]]) -> int:
+    """Take pairs that no longer pass out of pairs.csv (the scanner drops them on
+    reload). Their decision becomes a rejection with the reason, so the pair isn't
+    suggested or reviewed again."""
+    if not stale:
+        return 0
+    n = remove_pairs(cfg.pairs_path, {p.id for p, _ in stale})
+    now = time.time()
+    for pair, why in stale:
+        db.execute("UPDATE decisions SET decision = 'reject', source = 'recheck', note = ?, ts = ? "
+                   "WHERE kalshi = ? AND pm = ?", (why, now, pair.kalshi, pair.pm))
+        log.warning("unpaired %s <-> %s (%s): %s", pair.kalshi, pair.pm, pair.relation, why)
+    db.commit()
+    log.info("%d approved pairs no longer pass the checks; removed %d from %s", len(stale), n, cfg.pairs_path)
+    return n
 
 
 def run_novig(cfg: Config, db: sqlite3.Connection) -> list[tuple[str, Candidate]]:

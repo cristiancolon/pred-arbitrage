@@ -138,3 +138,29 @@ def test_first_pass_covers_both_venues(tmp_path, monkeypatch):
     monkeypatch.setattr(results, "BATCH", 8)
     asyncio.run(results.ResultsRecorder(run, run, Venue("K"), Venue("P")).step())
     assert asked == {"K": 4, "P": 4}
+
+
+def test_settled_pairs_tell_voids_from_conflicts(tmp_path):
+    path = str(tmp_path / "o.db")
+    db = connect(path)
+    rows = [  # (kalshi, pm, relation, Kalshi YES paid, Polymarket YES paid), from 2026-09-25..27
+        ("KXMLBGAME-26SEP241915CINATL-CIN", "aec-mlb-cin-atl", "same", 1.0, 1.0),
+        ("KXCS2GAME-26SEP250400ENCEWAL-WAL", "aec-cs2-wal-ence", "same", 0.52, 0.53),  # both voided the match
+        ("KXKBOGAME-26SEP250400SAMSSG-SAM", "aec-kbo-sls-sla", "inverse", 0.6, 0.0),  # Kalshi voided, Polymarket didn't
+        ("KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy", "same", 0.0, 1.0),  # game 2 paired with game 1
+    ]
+    for k, p, rel, kv, pv in rows:
+        db.execute("INSERT INTO decisions (kalshi, pm, decision, ts, source) VALUES (?, ?, ?, 0, 'jev')", (k, p, rel))
+        db.executemany(results.UPSERT, [results._row("K", k, "finalized", kv, None, None, None, NOW, {}),
+                                        results._row("P", p, results.PM_FINAL, pv, None, None, None, NOW, {})])
+    db.commit()
+    got = [(r["outcome"], round(r["miss"], 2), r["consistent"])
+           for r in db.execute("SELECT * FROM pair_outcomes ORDER BY kalshi")]
+    assert got == [("void", 0.01, 0), ("void", 0.4, 0), ("one bet", 0.0, 1), ("conflict", 1.0, 0)]
+
+    # A database made with the old view gets the new one on its next connect.
+    db.execute("DROP VIEW pair_outcomes")
+    db.execute("CREATE VIEW pair_outcomes AS SELECT kalshi FROM decisions")
+    db.commit()
+    db.close()
+    assert "outcome" in {c[0] for c in connect(path).execute("SELECT * FROM pair_outcomes").description}

@@ -77,7 +77,7 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
     windows, profit, capital = db.execute(
         "SELECT COUNT(*), COALESCE(SUM(max_profit), 0), COALESCE(SUM(cost_at_max), 0) FROM episodes "
         "WHERE start_ts >= ?", (now - 86400,)).fetchone()
-    settled, consistent = db.execute("SELECT COUNT(*), COALESCE(SUM(consistent), 0) FROM pair_outcomes").fetchone()
+    outcomes = dict(db.execute("SELECT outcome, COUNT(*) FROM pair_outcomes GROUP BY outcome").fetchall())
     results_n = db.execute("SELECT COUNT(*) FROM results WHERE yes_value IS NOT NULL").fetchone()[0]
     return {
         "catalog": {"kalshi": cat.get("K", {"count": 0, "updated": None}),
@@ -89,7 +89,8 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
                    "rejected": decisions.get("reject", 0), "auto": auto,
                    "jev": {"approved": jev.get(0, 0), "rejected": jev.get(1, 0), "unsure": jev_unsure}},
         "report": {"windows_24h": windows, "profit_24h": profit, "capital_24h": capital},
-        "settled": {"pairs": settled, "consistent": consistent, "results": results_n},
+        "settled": {"pairs": sum(outcomes.values()), "consistent": outcomes.get("one bet", 0),
+                    "void": outcomes.get("void", 0), "conflict": outcomes.get("conflict", 0), "results": results_n},
     }
 
 

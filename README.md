@@ -17,10 +17,21 @@ catalog  ->  match  ->  review  ->  scan  ->  report
    Polymarket US) into SQLite. It takes about 1.5 minutes and peaks around 200 MB.
 2. **match** suggests equivalent market pairs. It scores word similarity, then applies
    hard filters. Strikes, dates, game start times and teams must agree. So must the
-   qualifiers: 1st half vs full game, map 2, top 20, qualify vs win, draw markets, and
-   spread signs. It also works out whether Polymarket's YES is Kalshi's YES (**same**)
-   or Kalshi's NO (**inverse**, e.g. Kalshi "Braves win" vs a Reds/Braves moneyline
-   whose long side is the Reds).
+   qualifiers: 1st half vs full game, map 2, game 2 of a doubleheader, top 20, qualify
+   vs win, draw markets, games vs sets (a tennis game spread and set spread both read
+   "cover 1.5" on Polymarket US), and spread signs. When Kalshi's ticker gives the
+   scheduled start (`KXMLBGAME-26SEP251905BALNYY`), the two start times must be within
+   an hour (not for esports, whose start times are rough); otherwise 12 hours. It also
+   works out whether Polymarket's YES is Kalshi's YES (**same**) or Kalshi's NO
+   (**inverse**, e.g. Kalshi "Braves win" vs a Reds/Braves moneyline whose long side
+   is the Reds).
+
+   Every run also re-checks the pairs Jev or a rule approved: venues retitle and
+   reschedule markets after they're paired. A pair whose lines, qualifiers, stats,
+   dates or start times no longer agree is taken out of `pairs.csv`, and its
+   decision becomes a rejection (`source = 'recheck'`, with the reason in `note`).
+   Reworded labels don't count: they can leave the heuristics unable to confirm a
+   pair that is still right. A person's approval stands.
 3. **review** decides which suggestions are really the same bet. With a TypeSafe key,
    Jev reads both rulebooks for each one and approves only the pairs it is sure of;
    everything else is rejected, including the ones it can't decide. Approved pairs go
@@ -411,7 +422,7 @@ Everything is in `data/arbscan.db`, so you can query it directly:
 | `sweeps` | scanner health: one row per sweep (polling) or per second (streaming, where `dur_ms` is the median exchange-to-edge latency) |
 | `results` | how each paired market settled: what one YES contract paid (`yes_value`), the venue's result and status, when it closed and settled |
 | `window_outcomes` (view) | every window whose two markets have settled, with `payout_per_pair` and `realized_at_peak` |
-| `pair_outcomes` (view) | every approved pair whose markets have settled, and whether they settled as one bet (`consistent`) |
+| `pair_outcomes` (view) | every approved pair whose markets have settled: `outcome` is `one bet`, `void` (a venue cancelled or postponed it and settled at a price between 0 and 1) or `conflict` (both settled 0/1 and disagree); `miss` is how far a contract pair's payout was from $1 |
 
 ### Settlement results, for backtesting
 
@@ -431,9 +442,18 @@ contract pair in the window's direction paid: 1 when the markets settled as one 
 SELECT COUNT(*) AS windows, SUM(payout_per_pair = 1) AS paid, SUM(realized_at_peak) AS realized
 FROM window_outcomes;
 
--- Approved pairs that did not settle as one bet (what Jev or a rule got wrong).
-SELECT * FROM pair_outcomes WHERE NOT consistent;
+-- Approved pairs whose venues settled them differently: a wrong pair, or a venue that resolved it wrongly.
+SELECT * FROM pair_outcomes WHERE outcome = 'conflict';
 ```
+
+Of the first 5,806 approved pairs to settle (2026-09-25 to 27), 5,729 settled as one
+bet, 72 were voided (a postponed game or an inactive player; the two venues' void
+prices were a median 3¢ apart, at most 40¢) and 5 conflicted. Three of those were
+matching errors, fixed since: a tennis game spread paired with a set spread, and
+both teams of a doubleheader's game 2 paired with game 1 after Polymarket US moved
+its market three hours earlier. The other two were Polymarket US paying "Yes, the
+fight ended before round 2" (and round 3) on a fight that went to round 3; both
+venues' order books show it reaching both rounds.
 
 Together with `opportunities` (both order books, top 10 levels, at most once a second
 per pair and direction), `quotes` (every top-of-book change) and `paper_trades`, that

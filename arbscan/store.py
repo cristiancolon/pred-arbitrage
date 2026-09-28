@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     pm TEXT NOT NULL,
     decision TEXT NOT NULL,         -- 'same' | 'inverse' | 'reject'
     ts REAL NOT NULL,
-    source TEXT,                    -- 'human' | 'rule' (auto_approve) | 'jev'
+    source TEXT,                    -- 'human' | 'rule' (auto_approve) | 'jev' | 'recheck' (unpaired later)
+    note TEXT,                      -- why a recheck unpaired it
     PRIMARY KEY (kalshi, pm)
 );
 
@@ -255,23 +256,39 @@ JOIN results rk ON rk.venue = 'K' AND rk.id = substr(e.pair, 1, instr(e.pair, '|
 JOIN results rp ON rp.venue = 'P' AND rp.id = substr(e.pair, instr(e.pair, '|') + 1)
 WHERE rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
 
--- Approved pairs whose markets have both settled: did they settle as one bet?
-CREATE VIEW IF NOT EXISTS pair_outcomes AS
+"""
+
+
+# Views that have changed since the first release: ``connect`` replaces a stored view
+# whose SQL differs.
+VIEWS = {
+    # Approved pairs whose markets have both settled: did they settle as one bet?
+    # outcome: 'one bet' (a contract pair paid $1); 'void' (a venue cancelled the game
+    # or prop, e.g. postponed, and settled it at a price between 0 and 1, which the
+    # other venue may not match); 'conflict' (both settled 0 or 1 and disagree: a pair
+    # that wasn't the same bet, or a venue that resolved it wrongly). miss is how far
+    # a contract pair's payout was from $1.
+    "pair_outcomes": """CREATE VIEW pair_outcomes AS
 SELECT d.kalshi, d.pm, d.decision AS relation, d.source, rk.yes_value AS k_yes_value, rp.yes_value AS p_yes_value,
        rk.result AS k_result, rp.result AS p_result,
-       CASE WHEN d.decision = 'same' THEN abs(rk.yes_value - rp.yes_value) < 0.001
-            ELSE abs(rk.yes_value + rp.yes_value - 1) < 0.001 END AS consistent,
+       CASE WHEN d.decision = 'same' THEN abs(rk.yes_value - rp.yes_value)
+            ELSE abs(rk.yes_value + rp.yes_value - 1) END < 0.001 AS consistent,
+       CASE WHEN d.decision = 'same' THEN abs(rk.yes_value - rp.yes_value)
+            ELSE abs(rk.yes_value + rp.yes_value - 1) END AS miss,
+       CASE WHEN CASE WHEN d.decision = 'same' THEN abs(rk.yes_value - rp.yes_value)
+                      ELSE abs(rk.yes_value + rp.yes_value - 1) END < 0.001 THEN 'one bet'
+            WHEN rk.yes_value BETWEEN 0.001 AND 0.999 OR rp.yes_value BETWEEN 0.001 AND 0.999 THEN 'void'
+            ELSE 'conflict' END AS outcome,
        max(rk.first_final_ts, rp.first_final_ts) AS known_ts
 FROM decisions d
 JOIN results rk ON rk.venue = 'K' AND rk.id = d.kalshi
 JOIN results rp ON rp.venue = 'P' AND rp.id = d.pm
-WHERE d.decision IN ('same', 'inverse') AND rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
-"""
-
+WHERE d.decision IN ('same', 'inverse') AND rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL""",
+}
 
 # Columns added after the first release, so older databases can be upgraded in place.
 MIGRATIONS = {
-    "decisions": [("source", "TEXT")],
+    "decisions": [("source", "TEXT"), ("note", "TEXT")],
     "episodes": [("cost_at_max", "REAL"), ("cut", "INTEGER")],
     "sweeps": [("best_edge", "REAL"), ("best_pair", "TEXT"), ("best_dir", "TEXT")],
     "paper_trades": [("books", "TEXT")],
@@ -292,6 +309,11 @@ def connect(path: str) -> sqlite3.Connection:
         for name, kind in cols:
             if name not in have:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+    for name, sql in VIEWS.items():
+        have = db.execute("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?", (name,)).fetchone()
+        if have is None or have[0] != sql:
+            db.execute(f"DROP VIEW IF EXISTS {name}")
+            db.execute(sql)
     db.commit()
     return db
 

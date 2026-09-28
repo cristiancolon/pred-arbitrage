@@ -19,22 +19,27 @@ function bestEdge(p) {
 const PAGE = 100;
 
 // How approved pairs have settled so far (results.py records both venues' results).
+// A void is a venue cancelling the game or prop (e.g. postponed) and settling it at a
+// price between 0 and 1; a conflict is both venues settling 0/1 and disagreeing.
 function Settled() {
   const st = useStore((s) => s.state?.pipeline?.settled);
   if (!st?.pairs) return null;
-  const bad = st.pairs - st.consistent;
   return html`<span class="muted" style="font-size:12.5px" title="Approved pairs whose markets have both settled">
-    ${int(st.pairs)} settled: ${int(st.consistent)} as one bet${bad ? html`, <b style="color:var(--critical)">${int(bad)} not</b>` : ""}</span>`;
+    ${int(st.pairs)} settled: ${int(st.consistent)} as one bet${st.void ? html`, <span title="A venue cancelled the game or prop and settled it at a price between 0 and 1">${int(st.void)} voided</span>` : ""}${st.conflict ? html`, <b style="color:var(--critical)" title="Both venues settled 0 or 1 and disagree">${int(st.conflict)} conflicting</b>` : ""}</span>`;
 }
 
 function Outcome({ relation, settled }) {
   const k = settled?.K, p = settled?.P;
   if (!k || !p) return null;
-  const one = relation === "inverse" ? Math.abs(k.yes_value + p.yes_value - 1) < 0.001 : Math.abs(k.yes_value - p.yes_value) < 0.001;
-  const label = (v, r) => r || (v >= 0.5 ? "YES" : "NO");
-  return html`<${Banner} tone=${one ? "info" : "critical"}>
+  const miss = relation === "inverse" ? Math.abs(k.yes_value + p.yes_value - 1) : Math.abs(k.yes_value - p.yes_value);
+  const one = miss < 0.001;
+  const voided = [k.yes_value, p.yes_value].some((v) => v > 0.001 && v < 0.999);
+  const label = (v, r) => (v > 0.001 && v < 0.999 ? `voided at ${price(v)}` : r || (v >= 0.5 ? "YES" : "NO"));
+  return html`<${Banner} tone=${one ? "info" : voided ? "warning" : "critical"}>
     <b>Settled.</b> Kalshi: ${label(k.yes_value, k.result)} · Polymarket US: ${label(p.yes_value, p.result)}.
-    ${one ? " Both settled as one bet, so an arb here paid $1 a pair." : " They did not settle as one bet: an arb here would have lost."}<//>`;
+    ${one ? " Both settled as one bet, so an arb here paid $1 a pair."
+      : voided ? ` A venue cancelled it and settled at a price, so an arb here paid $1 give or take ${cents(miss, { sign: false, digits: 0 })} a pair.`
+      : " They did not settle as one bet: an arb here would have lost."}<//>`;
 }
 
 export function Pairs({ params }) {

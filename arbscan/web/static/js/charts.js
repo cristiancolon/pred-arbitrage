@@ -63,15 +63,37 @@ function valueAt(s, t) {
   return Math.abs(next[0] - t) < Math.abs(pts[lo][0] - t) ? next : pts[lo];
 }
 
+// A series' points within [t0, t1], starting from its value at t0 (carried for step
+// series, interpolated otherwise), so nothing is drawn outside the plot.
+function within(s, t0, t1) {
+  const has = (p) => p[1] !== null && p[1] !== undefined;
+  let before = null;
+  const out = [];
+  for (const p of s.points) {
+    if (p[0] < t0) { if (has(p)) before = p; }
+    else if (p[0] <= t1) out.push(p);
+  }
+  if (before && !(out.length && out[0][0] === t0)) {
+    const next = out.find(has);
+    const v = s.step || !next ? before[1] : before[1] + ((next[1] - before[1]) * (t0 - before[0])) / (next[0] - before[0]);
+    out.unshift([t0, v]);
+  }
+  return { ...s, points: out };
+}
+
+let clipIds = 0;
+
 function Tooltip({ x, y, width, children }) {
   const left = x > width - 190 ? x - 184 : x + 14;
   return html`<div class="tooltip" style=${`left:${Math.max(0, left)}px;top:${Math.max(0, y)}px`}>${children}</div>`;
 }
 
-export function LineChart({ series, height = 220, yFmt = (v) => v, xDomain, zero, zeroLabel, area = false, endLabel = false, emptyText = "No data yet" }) {
+export function LineChart({ series: given, height = 220, yFmt = (v) => v, xDomain, zero, zeroLabel, area = false, endLabel = false, emptyText = "No data yet" }) {
   const ref = useRef();
   const w = useWidth(ref);
   const [hover, setHover] = useState(null);
+  const [clip] = useState(() => `plot-${++clipIds}`);
+  const series = xDomain ? given.map((s) => within(s, xDomain[0], xDomain[1])) : given;
   const all = series.flatMap((s) => s.points.filter((p) => p[1] !== null && p[1] !== undefined));
   const legend = series.length >= 2 && html`<div class="legend">${series.map((s) =>
     html`<span><span class="key-line" style=${`background:${s.color}`}></span>${s.name}</span>`)}</div>`;
@@ -123,9 +145,12 @@ export function LineChart({ series, height = 220, yFmt = (v) => v, xDomain, zero
         ${zero !== undefined && zeroLabel && html`<text class="zero-label" x=${pad.l + iw - 4} y=${sy(zero) - 6} text-anchor="end">${zeroLabel}</text>`}
         <line class="baseline" x1=${pad.l} x2=${pad.l + iw} y1=${pad.t + ih} y2=${pad.t + ih} />
         ${xt.ticks.map((t) => html`<text class="tick" x=${sx(t)} y=${height - 6} text-anchor="middle">${xt.fmt(t)}</text>`)}
-        ${area && series.length === 1 && html`<path d=${`${path(series[0])}V${pad.t + ih}H${sx(series[0].points.find((p) => p[1] !== null)?.[0] ?? t0)}Z`}
-          fill=${series[0].color} opacity="0.1" />`}
-        ${series.map((s) => html`<path d=${path(s)} fill="none" stroke=${s.color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />`)}
+        <clipPath id=${clip}><rect x=${pad.l} y=${pad.t - 2} width=${iw} height=${ih + 4} /></clipPath>
+        <g clip-path=${`url(#${clip})`}>
+          ${area && series.length === 1 && html`<path d=${`${path(series[0])}V${pad.t + ih}H${sx(series[0].points.find((p) => p[1] !== null)?.[0] ?? t0)}Z`}
+            fill=${series[0].color} opacity="0.1" />`}
+          ${series.map((s) => html`<path d=${path(s)} fill="none" stroke=${s.color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />`)}
+        </g>
         ${series.map((s) => {
           const last = [...s.points].reverse().find((p) => p[1] !== null && p[1] !== undefined);
           if (!last) return null;
@@ -155,22 +180,24 @@ export function ColumnChart({ data, height = 200, yFmt = (v) => v, color = "var(
   const w = useWidth(ref);
   const [hover, setHover] = useState(null);
   const max = Math.max(0, ...data.map((d) => d.value));
-  if (!data.length || max <= 0) {
+  const min = Math.min(0, ...data.map((d) => d.value));
+  if (!data.length || (max <= 0 && min >= 0)) {
     return html`<div ref=${ref} class="chart-wrap"><div class="chart-empty" style=${`height:${height}px`}>${emptyText}</div></div>`;
   }
   const pad = { l: 56, r: 10, t: 18, b: 26 };
   const iw = Math.max(10, w - pad.l - pad.r), ih = height - pad.t - pad.b;
-  const y = niceDomain(0, max, Math.max(2, Math.floor(ih / 44)));
+  const y = niceDomain(min, max, Math.max(2, Math.floor(ih / 44)));
   const band = iw / data.length;
   const bw = Math.max(2, Math.min(24, band - 2));
-  const sy = (v) => pad.t + ih - (v / (y.hi || 1)) * ih;
-  const base = pad.t + ih;
+  const sy = (v) => pad.t + ih - ((v - y.lo) / (y.hi - y.lo || 1)) * ih;
+  const base = sy(0);
   const maxLabelW = Math.max(...data.map((d) => String(xFmt(d)).length)) * 6.5 + 10;
   const every = Math.max(1, Math.ceil(maxLabelW / band));
   const maxIdx = data.findIndex((d) => d.value === max);
-  const bar = (x, top) => {
-    const h = base - top, r = Math.min(4, h, bw / 2);
-    return `M${x},${base}V${top + r}Q${x},${top} ${x + r},${top}H${x + bw - r}Q${x + bw},${top} ${x + bw},${top + r}V${base}Z`;
+  // From zero to the value, rounded at the data end (the bottom, for a negative bar).
+  const bar = (x, end) => {
+    const dir = end <= base ? 1 : -1, r = Math.min(4, Math.abs(base - end), bw / 2) * dir;
+    return `M${x},${base}V${end + r}Q${x},${end} ${x + Math.abs(r)},${end}H${x + bw - Math.abs(r)}Q${x + bw},${end} ${x + bw},${end + r}V${base}Z`;
   };
   return html`<div ref=${ref} class="chart-wrap"><div class="chart" style=${`height:${height}px`}>
     ${w > 0 && html`<svg width=${w} height=${height} role="img" onPointerLeave=${() => setHover(null)}>
@@ -179,7 +206,8 @@ export function ColumnChart({ data, height = 200, yFmt = (v) => v, color = "var(
       ${data.map((d, i) => {
         const x = pad.l + i * band + (band - bw) / 2;
         return html`<g>
-          ${d.value > 0 && html`<path class=${`bar ${hover !== null && hover !== i ? "dim" : ""}`} d=${bar(x, sy(d.value))} fill=${color} />`}
+          ${d.value !== 0 && html`<path class=${`bar ${hover !== null && hover !== i ? "dim" : ""}`} d=${bar(x, sy(d.value))}
+            fill=${d.value > 0 ? color : "var(--critical)"} />`}
           ${i === maxIdx && band >= 18 && html`<text class="val-label" x=${x + bw / 2} y=${sy(d.value) - 6} text-anchor="middle">${yFmt(d.value)}</text>`}
           ${i % every === 0 && html`<text class="tick" x=${pad.l + i * band + band / 2} y=${height - 6} text-anchor="middle">${xFmt(d)}</text>`}
           <rect x=${pad.l + i * band} y=${pad.t} width=${band} height=${ih} fill="transparent" tabindex="0"
@@ -188,7 +216,7 @@ export function ColumnChart({ data, height = 200, yFmt = (v) => v, color = "var(
       })}
       <line class="baseline" x1=${pad.l} x2=${pad.l + iw} y1=${base} y2=${base} />
     </svg>`}
-    ${hover !== null && data[hover] && html`<${Tooltip} x=${pad.l + hover * band + band / 2} y=${Math.max(0, sy(data[hover].value) - 60)} width=${w}>
+    ${hover !== null && data[hover] && html`<${Tooltip} x=${pad.l + hover * band + band / 2} y=${Math.max(0, Math.min(base, sy(data[hover].value)) - 60)} width=${w}>
       <div class="t-head">${xFmt(data[hover])}</div>
       ${tooltip ? tooltip(data[hover]) : html`<div class="t-row"><span class="key-rect" style=${`background:${color}`}></span><b>${yFmt(data[hover].value)}</b></div>`}
     <//>`}

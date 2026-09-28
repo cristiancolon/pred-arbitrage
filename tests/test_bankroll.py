@@ -1,6 +1,6 @@
 import pytest
 
-from arbscan.bankroll import PickRules, simulate, window_rate
+from arbscan.bankroll import PickRules, payout_per_pair, simulate, window_profit, window_rate
 
 LOOSE = PickRules(min_window_s=1, min_annualized=0.10, max_edge=None, max_days=None, max_stake=None)
 
@@ -65,3 +65,34 @@ def test_stake_cap_shrinks_with_lock_up():
     r = simulate([slow, fast], 300, PickRules(min_annualized=0.1, max_stake=0.5))
     assert r["taken"] == 2
     assert r["profit"] == pytest.approx(9 * (50 / 300) + 3 * (150 / 300))  # fast: capped at half of $300
+
+
+def test_what_a_contract_pair_paid():
+    assert payout_per_pair("K:YES+P:NO", 1.0, 1.0) == 1.0  # one bet: Kalshi YES paid, Polymarket NO didn't
+    assert payout_per_pair("K:NO+P:YES", 1.0, 0.0) == 0.0  # not one bet: both legs lost
+    assert payout_per_pair("K:NO+P:NO", 1.0, 0.0) == 1.0
+    assert payout_per_pair("K:YES+P:NO", 0.52, 0.53) == pytest.approx(0.99)  # both voided, a cent apart
+    assert payout_per_pair("K:YES+P:NO", 1.0, None) is None  # Polymarket hasn't settled
+
+
+def test_settled_picks_count_what_they_paid():
+    won, lost, voided, open_ = (w(0, 98, 2, days=0.01), w(10, 98, 2, days=0.01),
+                                w(20, 98, 2, days=0.01), w(30, 98, 2, days=0.01))
+    won["payout"], lost["payout"], voided["payout"] = 1.0, 0.0, 0.97  # 100 pairs each at the peak
+    assert [window_profit(x) for x in (won, lost, voided, open_)] == pytest.approx([2, -98, -1, 2])
+    r = simulate([won, lost, voided, open_], 1000, LOOSE)
+    assert r["taken"] == 4
+    assert r["profit"] == pytest.approx(2 - 98 - 1 + 2)
+    assert r["settled"] == pytest.approx({"picks": 3, "profit": -97, "if_one_bet": 6})
+    assert r["pending"] == pytest.approx({"picks": 1, "profit": 2})
+
+
+def test_a_loss_comes_back_as_less_cash():
+    # Picks are chosen on what they were expected to pay; a pair that settled against
+    # us returns nothing, so the next pick finds less cash.
+    lost = w(0, 100, 5, days=0.01)
+    lost["payout"] = 0.0
+    later = w(7200, 100, 5, days=0.01)
+    r = simulate([lost, later], 100, LOOSE)
+    assert r["taken"] == 1 and r["skipped"] == {"no cash": 1}
+    assert r["profit"] == pytest.approx(-100)

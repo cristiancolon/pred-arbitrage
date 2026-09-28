@@ -202,8 +202,10 @@ Nothing needs a button press: new markets flow through to the scanner on their o
 
 - **Overview.** The five pipeline stages with live status. A chart of how close the
   best watched pair got to breakeven over time. Open opportunities and a
-  closest-to-breakeven leaderboard, both updated after every sweep. Best-case profit
-  by hour.
+  closest-to-breakeven leaderboard, both updated after every sweep. Picks' profit by
+  hour, and what one $300 bankroll could have made from them. Once both of a pick's
+  markets have settled it counts what they really paid (a void pays a few cents
+  either side of $1, a mismatched pair $0 or $2); until then, $1 a pair.
 - **Pairs.** Every watched pair with live prices and the net edge in both
   directions, 100 at a time (filtered and sorted on the server). Click a pair for
   which outcome matches which, its edge history, past windows and both rulebooks
@@ -213,7 +215,9 @@ Nothing needs a button press: new markets flow through to the scanner on their o
   lasted, how big the edge got, the capital it needed, its return per year, and why
   a window wasn't a pick.
 - **Paper trading.** The simulated account: P&L, cash on each venue, how much of
-  each pick actually filled, the latency used, and every paper trade.
+  each pick actually filled, the latency used, and every paper trade. Settled trades
+  count what their markets really paid, and the page shows how much that moved the
+  P&L from $1 a pair, with voided and mismatched trades flagged.
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without

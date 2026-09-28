@@ -138,10 +138,11 @@ export function Overview() {
       <${Tile} label="Profitable windows" value=${int(k.windows)}
         foot=${k.windows ? `${int(k.picks)} picks · median ${duration(k.median_duration)} open` : "none in this range"} />
       ${data?.sim ? html`<${Tile} label=${`With your ${money(data.sim.bankroll, 0)}`} value=${money(data.sim.profit)}
-          title=${`Simulated best case for one bankroll: whenever cash is free it funds the open picks with the best return per year first (a pick ${ruleText(data.sim)}); each stake stays tied up until its market resolves. Assumes each window is caught at its peak and both legs fill at the quoted prices.`}
-          foot=${`${int(data.sim.taken)} picks funded · ${money(data.sim.tied_up, 0)} still tied up`} />`
+          title=${`Simulated best case for one bankroll: whenever cash is free it funds the open picks with the best return per year first (a pick ${ruleText(data.sim)}); each stake stays tied up until its market resolves. Assumes each window is caught at its peak and both legs fill at the quoted prices. Picks whose markets have settled count what they really paid: ${money(data.sim.settled.profit)}, against ${money(data.sim.settled.if_one_bet)} had every pair paid $1.`}
+          foot=${`${int(data.sim.taken)} picks · ${money(data.sim.settled.profit)} settled · ${money(data.sim.pending.profit)} pending`} />`
         : html`<${Tile} label="Best-case profit" value=${money(k.profit)}
-          foot=${`on ${money(k.capital, 0)} of capital`} title="If every window were caught once at its peak, before slippage" />`}
+          foot=${`on ${money(k.capital, 0)} of capital`}
+          title=${`If every window were caught once at its peak, before slippage. Windows whose markets have settled count what they really paid: ${money(k.settled?.profit)}, against ${money(k.settled?.if_one_bet)} had every pair paid $1.`} />`}
       ${s?.scanner?.mode === "stream"
         ? html`<${Tile} label="Latency" value=${k.avg_sweep_ms != null ? `${Math.round(k.avg_sweep_ms)} ms` : "—"}
             title="Median time from the exchange's timestamp on a book update to the edge being computed here"
@@ -171,13 +172,16 @@ export function Overview() {
       <//>
     </div>
 
-    <${ChartCard} title="Picks' best-case profit by period"
-      sub=${`Sum of each pick's peak profit${data?.sim ? `, each sized to your ${money(data.sim.bankroll, 0)}` : ""}, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}. Picks overlap, so this adds up more than one bankroll could make.`}
+    <${ChartCard} title="Picks' profit by period"
+      sub=${`Sum of each pick's peak profit${data?.sim ? `, each sized to your ${money(data.sim.bankroll, 0)}` : ""}, grouped by ${data?.profit_bucket_s >= 86400 ? "day" : data?.profit_bucket_s >= 21600 ? "6 hours" : "hour"}: what it really paid once both markets settled, else $1 a pair. Picks overlap, so this adds up more than one bankroll could make.`}
       loading=${loading && data}
-      table=${{ columns: ["Period", "Windows", "Picks", "Best-case profit", "Capital"], rows: profit.slice().reverse().map((b) => [bucketFmt(b), b.windows, b.picks, money(b.profit), money(b.capital, 0)]) }}>
-      <${ColumnChart} data=${profit} height=${200} yFmt=${(v) => money(v, v < 10 ? 2 : 0)} xFmt=${bucketFmt}
+      table=${{ columns: ["Period", "Windows", "Picks", "Profit", "Settled picks", "vs $1 a pair", "Capital"],
+        rows: profit.slice().reverse().map((b) => [bucketFmt(b), b.windows, b.picks, money(b.profit), b.settled,
+          b.settled ? money(b.results) : "—", money(b.capital, 0)]) }}>
+      <${ColumnChart} data=${profit} height=${200} yFmt=${(v) => money(v, Math.abs(v) < 10 ? 2 : 0)} xFmt=${bucketFmt}
         emptyText="No profitable windows in this range"
-        tooltip=${(d) => html`<div class="t-row"><span class="key-rect" style="background:var(--series-1)"></span><b>${money(d.profit)}</b><span>best case</span></div>
+        tooltip=${(d) => html`<div class="t-row"><span class="key-rect" style="background:var(--series-1)"></span><b>${money(d.profit)}</b><span>${d.settled ? `${d.settled} of ${d.picks} picks settled` : "best case"}</span></div>
+          ${d.settled && Math.abs(d.results) >= 0.005 && html`<div class="t-row"><span></span><b>${money(d.results)}</b><span>from how markets settled, vs $1 a pair</span></div>`}
           <div class="t-row"><span></span><b>${d.picks}</b><span>picks of ${d.windows} windows · ${money(d.capital, 0)} capital</span></div>`} />
     <//>`;
 }

@@ -13,8 +13,11 @@ instead spends one pool of cash: whenever cash is free it funds the best-ranked
 picks open at that moment, each up to its stake cap (``PickRules.stake_fraction``)
 and the cash left, and keeps each stake tied up until its market resolves (then
 returns stake plus profit).
-It's still a best case: each window counts at its peak, both legs fill at the
-quoted prices, and nothing settles against you.
+It's still a best case: each window counts at its peak and both legs fill at the
+quoted prices. Once both of a window's markets have settled it counts what they
+really paid (``window_profit``): usually $1 a contract pair, but a venue can void a
+market at a price, or a pair can turn out not to be one bet. Picks are still chosen
+by the profit expected when they were open.
 """
 
 import heapq
@@ -42,6 +45,27 @@ def annualized(profit: float | None, cost: float | None, days: float | None) -> 
         return None
     d = UNKNOWN_RESOLUTION_DAYS if days is None else days
     return profit / cost * 365 / max(d, MIN_ANNUALIZE_DAYS)
+
+
+def payout_per_pair(direction: str, k_yes: float | None, p_yes: float | None) -> float | None:
+    """What one contract pair bought in ``direction`` ("K:YES+P:NO", ...) paid, given
+    what a YES contract paid on each venue: $1 when the markets settled as one bet, $0
+    or $2 when they didn't, in between when a venue voided at a price. None until both
+    have settled."""
+    if k_yes is None or p_yes is None:
+        return None
+    k = k_yes if direction.startswith("K:YES") else 1 - k_yes
+    p = p_yes if direction.endswith("P:YES") else 1 - p_yes
+    return k + p
+
+
+def window_profit(w: dict) -> float:
+    """A window's profit at its peak: what its contract pairs really paid if its
+    markets have settled (``payout``, per pair), else $1 a pair."""
+    pay = w.get("payout")
+    if pay is None:
+        return w["max_profit"]
+    return (w["max_profit"] + w["cost_at_max"]) * pay - w["cost_at_max"]
 
 
 def window_rate(w: dict) -> float:
@@ -92,9 +116,10 @@ class PickRules:
 
 
 def simulate(windows, bankroll: float, rules: PickRules, now: float | None = None) -> dict:
-    """``windows``: dicts with start_ts, end_ts, max_profit, cost_at_max, days_to_resolve
-    and max_top_edge. ``tied_up`` counts stakes still unresolved at ``now`` (default: the
-    last pick)."""
+    """``windows``: dicts with start_ts, end_ts, max_profit, cost_at_max, days_to_resolve,
+    max_top_edge and, once settled, payout. ``tied_up`` counts stakes still unresolved at
+    ``now`` (default: the last pick); ``settled`` is the picks whose markets have
+    settled, at what they paid and at what they'd have made had every pair paid $1."""
     skipped: Counter[str] = Counter()
     picks = []
     for w in windows:
@@ -109,6 +134,7 @@ def simulate(windows, bankroll: float, rules: PickRules, now: float | None = Non
     picks.sort(key=lambda x: x[0])
 
     cash, profit, taken = bankroll, 0.0, 0
+    settled = {"picks": 0, "profit": 0.0, "if_one_bet": 0.0}
     tied: list[tuple[float, float, float]] = []  # (resolves at, stake, profit)
     open_: list[dict] = []
     i = 0
@@ -130,12 +156,18 @@ def simulate(windows, bankroll: float, rules: PickRules, now: float | None = Non
             cap = rules.stake_fraction(w.get("days_to_resolve")) * capital
             frac = min(1.0, cash / w["cost_at_max"], cap / w["cost_at_max"])
             cash -= w["cost_at_max"] * frac
-            profit += w["max_profit"] * frac
+            gain = window_profit(w) * frac
+            profit += gain
             taken += 1
-            heapq.heappush(tied, (t + days_locked(w) * 86400, w["cost_at_max"] * frac, w["max_profit"] * frac))
+            if w.get("payout") is not None:
+                settled["picks"] += 1
+                settled["profit"] += gain
+                settled["if_one_bet"] += w["max_profit"] * frac
+            heapq.heappush(tied, (t + days_locked(w) * 86400, w["cost_at_max"] * frac, gain))
     skipped["no cash"] = len(picks) - taken
     if now is not None:
         tied = [x for x in tied if x[0] > now]
     return {"bankroll": bankroll, "profit": profit, "taken": taken, "picks": len(picks),
+            "settled": settled, "pending": {"picks": taken - settled["picks"], "profit": profit - settled["profit"]},
             "skipped": {k: v for k, v in skipped.items() if v}, "tied_up": sum(s for _, s, _ in tied),
             **rules.describe()}

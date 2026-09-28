@@ -4,6 +4,7 @@
 import sqlite3
 import statistics
 import time
+from collections import Counter
 
 from .. import bankroll
 
@@ -94,6 +95,12 @@ def pipeline(db: sqlite3.Connection, paired: set[tuple[str, str]], auto: int) ->
     }
 
 
+# What one YES contract paid on each venue, for a row of ``episodes e`` (NULL until settled).
+_EPISODE_RESULTS = (
+    "LEFT JOIN results rk ON rk.venue = 'K' AND rk.id = substr(e.pair, 1, instr(e.pair, '|') - 1) "
+    "LEFT JOIN results rp ON rp.venue = 'P' AND rp.id = substr(e.pair, instr(e.pair, '|') + 1)")
+
+
 def _bucket(hours: float, points: int) -> float:
     return max(3.0, hours * 3600 / points)
 
@@ -119,19 +126,29 @@ def overview(db: sqlite3.Connection, hours: float, bankroll_usd: float = 0.0,
     pb = 3600.0 if hours <= 48 else (6 * 3600.0 if hours <= 24 * 7 else 86400.0)
     start = since - (since % pb)
     n = int((now - start) // pb) + 1
-    buckets = [{"ts": start + i * pb, "windows": 0, "picks": 0, "profit": 0.0, "capital": 0.0} for i in range(n)]
+    buckets = [{"ts": start + i * pb, "windows": 0, "picks": 0, "profit": 0.0, "capital": 0.0, "settled": 0,
+                "results": 0.0} for i in range(n)]
     eps = [dict(e) for e in db.execute(
-        "SELECT start_ts, end_ts, max_profit, cost_at_max, max_top_edge, days_to_resolve "
-        "FROM episodes WHERE start_ts >= ?", (since,))]
+        "SELECT e.start_ts, e.end_ts, e.direction, e.max_profit, e.cost_at_max, e.max_top_edge, e.days_to_resolve, "
+        f"rk.yes_value AS k_yes, rp.yes_value AS p_yes FROM episodes e {_EPISODE_RESULTS} WHERE e.start_ts >= ?",
+        (since,))]
     picks = 0
     for e in eps:
+        e["max_profit"] = e["max_profit"] or 0.0
+        e["cost_at_max"] = e["cost_at_max"] or 0.0
+        e["payout"] = bankroll.payout_per_pair(e["direction"], e["k_yes"], e["p_yes"])
         i = min(n - 1, int((e["start_ts"] - start) // pb))
         buckets[i]["windows"] += 1
         if rules.window_reason(e) is None:
             picks += 1
-            buckets[i]["picks"] += 1
-            buckets[i]["profit"] += e["max_profit"] or 0
-            buckets[i]["capital"] += e["cost_at_max"] or 0
+            b = buckets[i]
+            b["picks"] += 1
+            b["profit"] += bankroll.window_profit(e)
+            b["capital"] += e["cost_at_max"]
+            if e["payout"] is not None:  # settled: what it paid against $1 a pair
+                b["settled"] += 1
+                b["results"] += bankroll.window_profit(e) - e["max_profit"]
+    settled = [e for e in eps if e["payout"] is not None]
     durations = [e["end_ts"] - e["start_ts"] for e in eps]
     simulated = bankroll.simulate(eps, bankroll_usd, rules, now) if bankroll_usd else None
     return {
@@ -144,7 +161,9 @@ def overview(db: sqlite3.Connection, hours: float, bankroll_usd: float = 0.0,
                                    / sum(r[5] for r in rows if r[3] is not None))
                              if any(r[3] is not None for r in rows) else None),
             "windows": len(eps), "picks": picks, "rules": rules.describe(),
-            "profit": sum(e["max_profit"] or 0 for e in eps), "capital": sum(e["cost_at_max"] or 0 for e in eps),
+            "profit": sum(bankroll.window_profit(e) for e in eps), "capital": sum(e["cost_at_max"] for e in eps),
+            "settled": {"windows": len(settled), "profit": sum(bankroll.window_profit(e) for e in settled),
+                        "if_one_bet": sum(e["max_profit"] for e in settled)},
             "median_duration": statistics.median(durations) if durations else None,
             "best_edge": best[0] if best else None, "best_pair": best[1] if best else None,
             "best_dir": best[2] if best else None, "best_ts": best[3] if best else None,
@@ -209,22 +228,41 @@ def opportunities(db: sqlite3.Connection, hours: float, rules: bankroll.PickRule
     }
 
 
+def settled_as(t: dict) -> str | None:
+    """How a settled paper trade's two legs paid, per contract held: 'one bet' ($1 a
+    pair), 'void' (a venue settled at a price) or 'conflict' (both 0/1, disagreeing)."""
+    if t.get("status") != "settled" or not t.get("k_hold") or not t.get("p_hold"):
+        return None
+    k, p = (t["payout_k"] or 0.0) / t["k_hold"], (t["payout_p"] or 0.0) / t["p_hold"]
+    if abs(k + p - 1) < 0.001:
+        return "one bet"
+    return "void" if 0.001 < k < 0.999 or 0.001 < p < 0.999 else "conflict"
+
+
 def paper(db: sqlite3.Connection, hours: float) -> dict:
-    """Paper trades in the last ``hours`` (newest first) and all-time totals."""
+    """Paper trades in the last ``hours`` (newest first) and totals since the account was
+    last reset. ``results`` is what settling cost or added against every settled pair
+    paying $1 (its locked-in profit)."""
     since = time.time() - hours * 3600
     rows = [dict(r) for r in db.execute("SELECT * FROM paper_trades WHERE ts >= ? ORDER BY ts DESC", (since,))]
     names = titles(db, sorted({r["pair"] for r in rows[:300]}))
     for r in rows[:300]:
         for key, value in names.get(r["pair"], {}).items():
             r.setdefault(key, value)
+        r["settled_as"] = settled_as(r)
     everything = [dict(r) for r in db.execute(
         "SELECT ts, status, planned_size, planned_profit, k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, "
-        "unwind_loss, locked_profit, pnl FROM paper_trades ORDER BY ts")]
+        "unwind_loss, locked_profit, pnl, payout_k, payout_p FROM paper_trades ORDER BY ts")]
+    held = [r for r in everything if settled_as(r)]
+    kinds = Counter(settled_as(r) for r in held)
     traded = [r for r in everything if r["status"] != "missed"]
     curve, total = [], 0.0
     for r in traded:  # settled trades at their result, open ones at the profit they locked in
         total += r["pnl"] if r["status"] == "settled" else (r["locked_profit"] or 0.0)
-        curve.append([r["ts"], total])
+        if r["ts"] < since:
+            curve[:] = [[since, total]]  # the range starts from the running total
+        else:
+            curve.append([r["ts"], total])
     planned = sum(r["planned_size"] or 0 for r in everything)
     filled = sum(min(r["k_qty"] or 0, r["p_qty"] or 0) for r in everything)
     return {
@@ -236,6 +274,8 @@ def paper(db: sqlite3.Connection, hours: float) -> dict:
             "planned_profit": sum(r["planned_profit"] or 0 for r in traded),
             "fees": sum((r["k_fees"] or 0) + (r["p_fees"] or 0) for r in traded),
             "unwind_loss": sum(r["unwind_loss"] or 0 for r in traded),
+            "results": {"effect": sum(r["pnl"] - (r["locked_profit"] or 0.0) for r in held),
+                        "settled": len(held), "void": kinds["void"], "conflict": kinds["conflict"]},
             "pnl": total,
         },
     }

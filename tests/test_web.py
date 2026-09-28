@@ -150,3 +150,47 @@ def test_paper_endpoint(env):
     assert data["totals"]["sent"] == 2 and data["totals"]["missed"] == 1
     assert data["totals"]["fill_rate"] == pytest.approx(8 / 20)
     assert client.get("/api/state").json()["paper"] is None
+
+
+def _trade(db, tid, ts, status, locked, pnl=None, pay=(None, None), hold=10):
+    db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, planned_profit, "
+               "k_qty, p_qty, k_hold, p_hold, k_out, p_out, locked_profit, status, payout_k, payout_p, pnl) "
+               "VALUES (?, ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', ?, ?, ?, ?, ?, ?, 4.8, 4.8, ?, ?, ?, ?, ?)",
+               (tid, ts, hold, locked, hold, hold, hold, hold, locked, status, pay[0], pay[1], pnl))
+
+
+def test_paper_counts_what_settled_trades_really_paid(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    _trade(db, "old", NOW - 7200, "settled", 0.4, 0.4, (10, 0))  # before the range: one bet
+    _trade(db, "won", NOW - 600, "settled", 0.4, 0.4, (0, 10))  # one bet
+    _trade(db, "void", NOW - 500, "settled", 0.4, 0.1, (5.2, 4.5))  # both voided, 3 cents a pair apart
+    _trade(db, "wrong", NOW - 400, "settled", 0.4, -9.6, (0, 0))  # the legs settled against each other
+    _trade(db, "open", NOW - 300, "open", 0.4)
+    db.commit()
+    data = TestClient(create_app(svc)).get("/api/paper?hours=1").json()
+    by = {t["id"]: t["settled_as"] for t in data["trades"]}
+    assert by == {"won": "one bet", "void": "void", "wrong": "conflict", "open": None}
+    assert data["totals"]["results"] == pytest.approx({"effect": -0.3 - 10, "settled": 4, "void": 1, "conflict": 1})
+    assert data["totals"]["pnl"] == pytest.approx(0.4 + 0.4 + 0.1 - 9.6 + 0.4)
+    # The curve starts the range from the running total instead of drawing earlier trades.
+    assert data["curve"][0] == pytest.approx([data["since"], 0.4])
+    assert [p[1] for p in data["curve"][1:]] == pytest.approx([0.8, 0.9, -8.7, -8.3])
+
+
+def test_overview_counts_what_settled_windows_paid(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    client = TestClient(create_app(svc))
+    before = client.get("/api/overview?hours=1").json()
+    assert before["kpi"]["profit"] == pytest.approx(1.5) and before["sim"]["settled"]["picks"] == 0
+    # The window bought Kalshi YES + Polymarket NO; Kalshi said NO and Polymarket YES: both legs lost.
+    db.execute("INSERT INTO results (venue, id, yes_value, checked_ts) VALUES ('K', 'K-1', 0.0, ?), "
+               "('P', 'p-1', 1.0, ?)", (NOW, NOW))
+    db.commit()
+    data = client.get("/api/overview?hours=1").json()
+    assert data["kpi"]["profit"] == pytest.approx(-148)
+    assert data["kpi"]["settled"] == pytest.approx({"windows": 1, "profit": -148, "if_one_bet": 1.5})
+    assert sum(b["profit"] for b in data["profit"]) == pytest.approx(-148)
+    assert data["sim"]["profit"] == pytest.approx(-148)
+    assert data["sim"]["settled"] == pytest.approx({"picks": 1, "profit": -148, "if_one_bet": 1.5})

@@ -11,6 +11,14 @@ function Status({ t }) {
   if (t.status === "missed") return html`<span class="muted nowrap" style="font-size:12px">No fill</span>`;
   if (t.status === "open") return html`<${Badge} icon="clock">${t.note ? "Open · unhedged" : "Held to resolution"}<//>`;
   if (t.note === "unwound") return html`<${Badge} tone="warning" icon="alert">Unwound<//>`;
+  if (t.settled_as === "void") {
+    return html`<span title="A venue cancelled the market and settled it at a price, so the pair didn't pay exactly $1">
+      <${Badge} tone="warning" icon="alert">Voided<//></span>`;
+  }
+  if (t.settled_as === "conflict") {
+    return html`<span title="The two markets settled differently: the pair wasn't one bet, or a venue resolved it wrongly">
+      <${Badge} tone="critical" icon="xcircle">Mismatch<//></span>`;
+  }
   return html`<${Badge} tone=${t.pnl >= 0 ? "good" : "critical"} icon=${t.pnl >= 0 ? "check" : "xcircle"}>Settled<//>`;
 }
 
@@ -33,6 +41,7 @@ export function Paper() {
   const { data, loading } = useFetch(`/api/paper?hours=${hours}`, [], { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
   const live = data?.live;
   const tot = data?.totals || {};
+  const res = tot.results || {};
   const trades = data?.trades || [];
   if (data && !live) {
     return html`<${Banner} tone="info">Paper trading runs with the streaming scanner. Set both venues' API keys and
@@ -71,6 +80,8 @@ export function Paper() {
           <dt>Expected when deciding</dt><dd class="num">${money(tot.planned_profit)}</dd>
           <dt>Taker fees paid</dt><dd class="num">${money(tot.fees)} <span class="muted">(already in the expectation)</span></dd>
           <dt>Lost unwinding one-sided fills</dt><dd class="num">${money(tot.unwind_loss)}</dd>
+          <dt title="What settled trades really paid, against each contract pair paying $1">How the markets settled</dt>
+          <dd class="num">${money(res.effect)} <span class="muted">(${int(res.settled)} settled${res.void ? ` · ${int(res.void)} voided` : ""}${res.conflict ? ` · ${int(res.conflict)} mismatched` : ""})</span></dd>
           <dt>P&L (settled + locked in)</dt><dd class="num"><b>${money(tot.pnl)}</b></dd>
         </dl>
       <//>

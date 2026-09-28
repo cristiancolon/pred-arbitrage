@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from . import bankroll, catalog, config, discover, jev, match, novig_gaps, report, rescale, review, scanner, store
+from . import bankroll, catalog, config, discover, jev, match, novig, novig_gaps, report, rescale, review, scanner, store
 
 
 def _run(coro):
@@ -15,6 +15,21 @@ def _run(coro):
     except ImportError:
         return asyncio.run(coro)
     return uvloop.run(coro)
+
+
+async def _novig_key(cfg, args) -> None:
+    from pathlib import Path
+
+    from .auth import NovigSigner
+    from .http import make_client
+
+    mgmt = Path(args.management_key).expanduser()
+    out = Path(args.trading_key_out or mgmt.with_name(f"novig-trading-{args.label}.pem")).expanduser()
+    async with make_client() as client:
+        account = novig.NovigAccount(client, cfg.novig_base, NovigSigner.from_file(args.management_key_id, str(mgmt)))
+        made = await novig.issue_read_key(account, Path(args.public_key).expanduser().read_text(), args.label, out)
+    print(f"read key {made['key_id']} ({made['fingerprint']}) on subaccount {made['subaccount']}")
+    print(f'set novig_key_id = "{made["key_id"]}" and novig_private_key_path in config.toml')
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -29,6 +44,14 @@ def main(argv: list[str] | None = None) -> None:
     ng.add_argument("--hours", type=float, default=36.0, help="games starting within this many hours")
     ng.add_argument("--once", action="store_true", help="one sweep, then exit")
     ng.add_argument("--report", action="store_true", help="summarize what's been sampled instead")
+    nk = sub.add_parser("novig-key", help="issue a read-only Novig key (streams books; can't trade or move money)")
+    nk.add_argument("--management-key", required=True, help="the management key's PEM, downloaded from Novig's web app")
+    nk.add_argument("--management-key-id", required=True, help="its key ID, shown beside it in the web app")
+    nk.add_argument("--public-key", required=True, help="SPKI PEM of the read key to register (keep its private half "
+                                                        "on the machine that streams)")
+    nk.add_argument("--label", default="arbscan", help="subaccount to issue it on, opened if missing")
+    nk.add_argument("--trading-key-out", help="where a newly opened subaccount's trading key goes (default: beside "
+                                              "the management key)")
     r = sub.add_parser("review", help="approve or reject suggested pairs")
     r.add_argument("--min-score", type=float, default=None)
     r.add_argument("--list", action="store_true", help="print pending candidates instead of prompting")
@@ -71,6 +94,8 @@ def main(argv: list[str] | None = None) -> None:
                 novig_gaps.report(db, args.hours)
             else:
                 asyncio.run(novig_gaps.run(cfg, db, args.hours, once=args.once))
+        elif args.cmd == "novig-key":
+            asyncio.run(_novig_key(cfg, args))
         elif args.cmd == "review":
             min_score = cfg.match_min_score if args.min_score is None else args.min_score
             if args.list:

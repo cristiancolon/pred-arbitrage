@@ -10,6 +10,10 @@ a millisecond of the data arriving instead of waiting for the next poll.
   ``market_lifecycle_v2`` reports markets pausing, closing and settling.
 - Polymarket US (``SUBSCRIPTION_TYPE_MARKET_DATA``): every message is the market's
   full top-of-book ladder plus its trading state, so there is nothing to sequence.
+- Novig (``/v3/ws``, ``book`` channel): a snapshot of every resting order per
+  outcome, then order adds and removes, numbered per market; a gap is repaired by
+  asking for that market's snapshot again. Its ``lifecycle`` reports opening,
+  closing, and going live (which switches taker fees on).
 
 A book is only ``ready`` between its snapshot and the next disconnect or gap; the
 scanner ignores pairs whose books aren't ready.
@@ -25,13 +29,15 @@ from datetime import datetime
 import orjson
 import websockets
 
-from .auth import KalshiSigner, PMSigner
+from .auth import KalshiSigner, NovigSigner, PMSigner
 from .book import Level, pmus_ladders
+from .novig import asks_from
 
 log = logging.getLogger(__name__)
 
 KALSHI_WS_PATH = "/trade-api/ws/v2"
 PM_WS_PATH = "/v1/ws/markets"
+NOVIG_WS_PATH = "/v3/ws"
 RECONNECT_MAX_S = 30.0
 
 
@@ -545,3 +551,190 @@ class PMFeed:
         finally:
             stopping.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+class NovigBook:
+    """One Novig market: resting orders per outcome (in queue order) and its status."""
+
+    __slots__ = ("orders", "outcome_of", "seq", "life_seq", "status", "live", "ready", "recv_ts", "exch_ts",
+                 "stamped", "_ladders")
+
+    def __init__(self) -> None:
+        self.orders: dict[str, dict[str, tuple[str, int]]] = {}  # outcome -> order -> (price, qty)
+        self.outcome_of: dict[str, str] = {}
+        self.seq = self.life_seq = -1
+        self.status: str | None = None
+        self.live = False  # between GOLIVE and UNLIVE: taker fees on (for WHEN_LIVE markets)
+        self.ready = False
+        self.recv_ts = 0.0
+        self.exch_ts: float | None = None
+        self.stamped = False
+        self._ladders: dict[tuple[str, str], tuple[list, list]] = {}
+
+    def snapshot(self, book: dict | None, life: dict | None, recv: float, exch: float | None) -> None:
+        if book is not None:
+            self.orders = {out: {o["order"]: (o["price"], o["qty"]) for o in os_}
+                           for out, os_ in (book.get("orders") or {}).items()}
+            self.outcome_of = {oid: out for out, os_ in self.orders.items() for oid in os_}
+            self.seq = book.get("seq", 0)
+            self.ready = True
+            self._ladders.clear()
+        if life is not None:
+            self.status, self.life_seq = life.get("status"), life.get("seq", 0)
+        self._stamp(recv, exch)
+
+    def delta(self, book: dict | None, life: dict | None, recv: float, exch: float | None) -> bool:
+        """Apply one message's changes. False on a gap: the book is no longer ready
+        until a fresh snapshot arrives."""
+        ok = True
+        if book is not None and self.ready:
+            if book.get("seq") != self.seq + 1:
+                self.ready, ok = False, False
+            else:
+                self.seq = book["seq"]
+                for d in book.get("deltas") or ():
+                    if d.get("kind") == "add":
+                        self.orders.setdefault(d["outcome"], {})[d["order"]] = (d["price"], d["qty"])
+                        self.outcome_of[d["order"]] = d["outcome"]
+                    elif d.get("kind") == "remove":
+                        out = self.outcome_of.pop(d["order"], None)
+                        if out is not None:
+                            self.orders[out].pop(d["order"], None)
+                self._ladders.clear()
+        if life is not None:
+            if self.life_seq >= 0 and life.get("seq") != self.life_seq + 1:
+                ok = False  # the book's own seq still vouches for its orders
+            self.life_seq = life.get("seq", self.life_seq)
+            for t in life.get("deltas") or ():
+                if t == "GOLIVE":
+                    self.live = True
+                elif t == "UNLIVE":
+                    self.live = False
+                elif t in ("OPEN", "CLOSE", "GRADE"):
+                    self.status = {"OPEN": "OPEN", "CLOSE": "CLOSED", "GRADE": "SETTLED"}[t]
+        self._stamp(recv, exch)
+        return ok
+
+    def _stamp(self, recv: float, exch: float | None) -> None:
+        self.recv_ts, self.exch_ts, self.stamped = recv, exch, exch is not None
+
+    @property
+    def open(self) -> bool:
+        return self.status == "OPEN"
+
+    def ladders(self, yes_id: str, no_id: str) -> tuple[list[Level], list[Level]]:
+        """(yes_asks, no_asks) in $1 contracts, cheapest first (see ``novig.ladders``)."""
+        key = (yes_id, no_id)
+        got = self._ladders.get(key)
+        if got is None:
+            got = self._ladders[key] = (asks_from(self.orders.get(no_id, {}).values()),
+                                        asks_from(self.orders.get(yes_id, {}).values()))
+        return got
+
+
+class TokenBucket:
+    """Novig's per-key ``stream`` throttle, modelled locally so requests wait instead
+    of being refused. A request costing more than the capacity is charged the
+    capacity, and only passes when the bucket is full."""
+
+    def __init__(self, capacity: float, refill: float):
+        self.capacity, self.refill = capacity, refill
+        self.tokens, self.ts = capacity, time.monotonic()
+
+    def wait_s(self, cost: float) -> float:
+        now = time.monotonic()
+        self.tokens = min(self.capacity, self.tokens + (now - self.ts) * self.refill)
+        self.ts = now
+        need = min(cost, self.capacity)
+        return max(0.0, (need - self.tokens) / self.refill)
+
+    def spend(self, cost: float) -> None:
+        self.tokens -= min(cost, self.capacity)
+
+
+class NovigFeed(_Feed):
+    """Every watched Novig market's ``book`` (with ``lifecycle``) on one connection.
+    Subscribing costs 16 tokens a market from a bucket of 512 refilling at 4 a
+    second, but one request is charged at most 512, so all markets go in a single
+    subscribe sent when the bucket is full. One connection watches up to 2,048."""
+
+    name = "novig"
+    BOOK_WEIGHT = 16
+    UPGRADE_COST = 32
+    MAX_MARKETS = 2048
+
+    def __init__(self, url: str, signer: NovigSigner, on_update: Callable[[str], None]):
+        super().__init__(url, on_update)
+        self.signer = signer
+        self.books: dict[str, NovigBook] = {}
+        self.bucket = TokenBucket(512, 4)
+        self.subscribed: set[str] = set()
+        self.resnap: set[str] = set()  # markets whose book had a gap
+        self.nonce = 0
+        self.errors: deque[dict] = deque(maxlen=20)
+
+    def _headers(self) -> dict[str, str]:
+        self.bucket.spend(self.UPGRADE_COST)
+        return self.signer.headers("GET", NOVIG_WS_PATH)
+
+    async def _request(self, verb: str, arg, cost: float) -> None:
+        wait = self.bucket.wait_s(cost)
+        if wait > 0:
+            await asyncio.sleep(wait)
+            self.bucket.wait_s(cost)
+        self.bucket.spend(cost)
+        self.nonce += 1
+        await self._send({"nonce": self.nonce, verb: arg})
+
+    async def _on_connect(self) -> None:
+        self.nonce = 0
+        self.subscribed = set()
+        self.resnap.clear()
+        await self._sync()
+
+    async def _sync(self) -> None:
+        if self.ws is None:
+            return
+        wanted = set(sorted(self.wanted)[: self.MAX_MARKETS]) if len(self.wanted) > self.MAX_MARKETS else self.wanted
+        gone = sorted(self.subscribed - wanted)
+        if gone:
+            await self._request("unsubscribe", [f"market:{m}" for m in gone], len(gone))
+            self.subscribed -= set(gone)
+            for m in gone:
+                self.books.pop(m, None)
+        new = sorted(wanted - self.subscribed)
+        if new:
+            await self._request("subscribe", {"markets": {m: "book" for m in new}}, self.BOOK_WEIGHT * len(new))
+            self.subscribed |= set(new)
+            log.info("novig: subscribed to %d markets (%d watched)", len(new), len(self.subscribed))
+        if self.resnap:
+            todo = sorted(self.resnap & self.subscribed)
+            self.resnap.clear()
+            if todo:
+                await self._request("snapshot", {"markets": {m: "book" for m in todo}}, self.BOOK_WEIGHT * len(todo))
+
+    def _handle(self, msg: dict, recv: float) -> None:
+        exch = msg["ts"] / 1000 if msg.get("ts") else None
+        if exch is not None:
+            self.stats.lags.append(recv - exch)
+        for mid, s in (msg.get("snapshot") or {}).items():
+            book = self.books.setdefault(mid, NovigBook())
+            book.snapshot(s.get("book"), s.get("lifecycle"), recv, exch)
+            self.on_update(mid)
+        for mid, d in (msg.get("delta") or {}).items():
+            book = self.books.get(mid)
+            if book is None:
+                continue
+            if not book.delta(d.get("book"), d.get("lifecycle"), recv, exch):
+                log.info("novig: gap on %s; asking for its snapshot", mid)
+                self.resnap.add(mid)
+                self._changed.set()
+            self.on_update(mid)
+        if msg.get("code"):  # an error reply
+            self.errors.append({"ts": recv, "code": msg["code"], "message": msg.get("message")})
+            log.warning("novig: %s: %s (nonce %s)", msg["code"], msg.get("message"), msg.get("nonce"))
+
+    def _disconnected(self) -> None:
+        for book in self.books.values():
+            book.ready = False
+        self.subscribed = set()

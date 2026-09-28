@@ -17,6 +17,9 @@ and notifies the dashboard, so neither slows the feed.
 
 With ``paper_trading`` on, every pick is also handed to the paper trader (paper.py),
 which simulates acting on it with this machine's measured order latency.
+
+With a Novig key, Novig's books stream too and its pairs are priced the same way
+against these Kalshi and Polymarket US books (novig_live.py).
 """
 
 import asyncio
@@ -30,8 +33,9 @@ from .arb import Leg, directions, top_edge, walk
 from .book import top_n
 from .config import Config
 from .dbwriter import DbWriter
-from .feeds import KalshiFeed, PMFeed
+from .feeds import KalshiFeed, NovigFeed, PMFeed
 from .latency import LatencyModel, LatencyProbe
+from .novig_live import NovigLink
 from .paper import PaperTrader
 from .results import UPSERT, kalshi_lifecycle_row, lookup
 from .pairs import Pair
@@ -50,7 +54,8 @@ LIFECYCLE_STATUS = {"deactivated": "inactive", "activated": "active", "determine
 class LiveScanner(Scanner):
     mode = "stream"
 
-    def __init__(self, cfg: Config, db, kalshi: Kalshi, pm: PolymarketUS, kfeed: KalshiFeed, pfeed: PMFeed):
+    def __init__(self, cfg: Config, db, kalshi: Kalshi, pm: PolymarketUS, kfeed: KalshiFeed, pfeed: PMFeed,
+                 nfeed: NovigFeed | None = None):
         super().__init__(cfg, db, kalshi, pm)
         # Recordings go through a writer thread so SQLite never blocks the feeds;
         # ``db`` stays for reads.
@@ -67,6 +72,7 @@ class LiveScanner(Scanner):
         self._errors_seen = 0
         self._meta_pending = False  # pairs changed while a metadata refresh was running
         self.latency = LatencyModel(self._feed_lags)
+        self.novig = NovigLink(self, nfeed) if nfeed is not None else None
         self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
                                   wake=self._wake)
                       if cfg.paper_trading else None)
@@ -97,16 +103,17 @@ class LiveScanner(Scanner):
         known = {p.id for p in self.pairs.pairs}
         for pid in [p for p in self.pair_state if p not in known]:
             del self.pair_state[pid]
-        self.kfeed.set_markets(self.by_ticker)
-        self.pfeed.set_markets(self.by_slug)
+        novig = self.novig
+        self.kfeed.set_markets(set(self.by_ticker) | (novig.tickers() if novig else set()))
+        self.pfeed.set_markets(set(self.by_slug) | (novig.slugs() if novig else set()))
 
     async def refresh_meta(self, force: bool = False) -> None:
-        tickers = sorted(self.by_ticker)
+        tickers = sorted(set(self.by_ticker) | (self.novig.tickers() if self.novig else set()))
         stale = force or time.monotonic() - self.meta_ts > self.cfg.meta_refresh_s
         new = [t for t in tickers if t not in self.kmeta]
         if tickers and (stale or new):
             await self.refresh_kalshi_meta(tickers if stale else new)
-        slugs = sorted(self.by_slug)
+        slugs = sorted(set(self.by_slug) | (self.novig.slugs() if self.novig else set()))
         stale_p = force or time.monotonic() - self.pm_meta_ts > self.cfg.meta_refresh_s
         todo = slugs if stale_p else [s for s in slugs if s not in self.pm_coef]
         if todo:
@@ -143,6 +150,8 @@ class LiveScanner(Scanner):
         seen = book.recv_ts if book is not None else None
         for p in self.by_ticker.get(ticker, ()):
             self._evaluate(p, seen)
+        if self.novig is not None:
+            self.novig.on_other("K", ticker)
         self._lag(book)
 
     def _on_pm(self, slug: str) -> None:
@@ -150,6 +159,8 @@ class LiveScanner(Scanner):
         seen = book.recv_ts if book is not None else None
         for p in self.by_slug.get(slug, ()):
             self._evaluate(p, seen)
+        if self.novig is not None:
+            self.novig.on_other("P", slug)
         self._lag(book)
 
     def _wake(self, pair: Pair, delay: float) -> None:
@@ -182,6 +193,8 @@ class LiveScanner(Scanner):
         else:
             for p in self.by_ticker.get(t, ()):
                 self._evaluate(p)  # the book didn't change: nothing new was seen
+        if self.novig is not None:
+            self.novig.on_other("K", t)
 
     def _evaluate(self, pair: Pair, seen: float | None = None) -> None:
         """Re-price a pair. ``seen``: when the update that triggered this arrived (None
@@ -316,13 +329,20 @@ class LiveScanner(Scanner):
             self.paper.forget_idle()
 
     def feed_state(self) -> dict:
-        return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}
+        out = {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}
+        if self.novig is not None:
+            out["novig"] = self.novig.snapshot()
+        return out
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         log.info("streaming scanner started")
         self.pairs.refresh()
+        if self.novig is not None:
+            self.novig.reload()
         self._reindex()
         tasks = [asyncio.create_task(self.kfeed.run(stop)), asyncio.create_task(self.pfeed.run(stop))]
+        if self.novig is not None:
+            tasks.append(asyncio.create_task(self.novig.feed.run(stop)))
         if self.paper is not None:
             # Orders go to the same host as the authenticated feed (api.polymarket.us).
             pm_api = "https://" + urlparse(self.cfg.pmus_ws_url).netloc
@@ -346,6 +366,8 @@ class LiveScanner(Scanner):
                     pass
                 try:
                     changed = self.pairs.refresh()
+                    if self.novig is not None and self.novig.due():
+                        changed |= self.novig.reload()
                     if changed:
                         self._reindex()
                     stale = time.monotonic() - min(self.meta_ts, self.pm_meta_ts) > self.cfg.meta_refresh_s
@@ -363,6 +385,8 @@ class LiveScanner(Scanner):
             # Save open windows first, so nothing below can keep them from being written.
             n = len(self.episodes.open)
             self.episodes.close_all()
+            if self.novig is not None:
+                self.novig.windows.close_all()
             self.out.flush()
             log.info("saved %d open windows as cut short by the stop", n)
             await asyncio.gather(*tasks, return_exceptions=True)

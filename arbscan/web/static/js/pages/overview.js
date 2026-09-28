@@ -77,7 +77,7 @@ export function Pipeline() {
       foot=${sc.pairs.total === 0 ? html`<${Status}>Idle until pairs are approved<//>`
         : streaming && fresh ? html`<${Status} tone=${feedsUp ? "good" : "warning"} pulse=${feedsUp}>${feedsUp
             ? `Streaming · ${last.dur_ms != null ? `${last.dur_ms} ms behind the exchanges` : "waiting for updates"}`
-            : `Reconnecting: ${Object.entries(sc.feeds || {}).filter(([, f]) => !f.connected).map(([n]) => (n === "pmus" ? "Polymarket" : "Kalshi")).join(", ")}`}<//>`
+            : `Reconnecting: ${Object.entries(sc.feeds || {}).filter(([, f]) => !f.connected).map(([n]) => ({ pmus: "Polymarket", novig: "Novig" })[n] || "Kalshi").join(", ")}`}<//>`
         : fresh ? html`<${Status} tone="good" pulse>Sweeping every ${sc.poll_interval_s}s · ${(last.dur_ms / 1000).toFixed(1)}s each<//>`
         : html`<${Status} tone="warning">Last sweep ${ago(last?.ts, now)}<//>`} />
     <${Stage} icon="chart" name="Report" active=${picksNow > 0}

@@ -168,6 +168,24 @@ CREATE TABLE IF NOT EXISTS episodes (
 );
 CREATE INDEX IF NOT EXISTS episodes_start ON episodes (start_ts);
 
+-- Novig windows (novig_live.py), like episodes: pair is "<K|P>:<other market>|<Novig market>",
+-- direction N:YES+O:NO etc. (O = the other venue).
+CREATE TABLE IF NOT EXISTS novig_windows (
+    pair TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    n_obs INTEGER NOT NULL,
+    max_top_edge REAL,
+    max_profit REAL,
+    max_size INTEGER,
+    first_profit REAL,
+    cost_at_max REAL,
+    days_to_resolve REAL,
+    cut INTEGER
+);
+CREATE INDEX IF NOT EXISTS novig_windows_start ON novig_windows (start_ts);
+
 CREATE TABLE IF NOT EXISTS sweeps (
     ts REAL NOT NULL,
     n_pairs INTEGER,

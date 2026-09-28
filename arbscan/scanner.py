@@ -83,14 +83,15 @@ class Episodes:
 
     RESUME_S = 600.0
 
-    def __init__(self, db: sqlite3.Connection, reader: sqlite3.Connection | None = None):
+    def __init__(self, db: sqlite3.Connection, reader: sqlite3.Connection | None = None, table: str = "episodes"):
         self.db = db
+        self.table = table  # episodes, or novig_windows (same columns)
         self.open: dict[tuple[str, str], Episode] = {}
         self.resumable: dict[tuple[str, str], tuple[int, Episode]] = {}
         if reader is not None:
             for r in reader.execute(
                     "SELECT rowid, pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, max_size, "
-                    "first_profit, cost_at_max, days_to_resolve FROM episodes WHERE cut = 1 AND end_ts >= ?",
+                    f"first_profit, cost_at_max, days_to_resolve FROM {table} WHERE cut = 1 AND end_ts >= ?",
                     (time.time() - self.RESUME_S,)):
                 self.resumable[(r[1], r[2])] = (r[0], Episode(*r[3:12]))
 
@@ -99,7 +100,7 @@ class Episodes:
         if saved is None or ts - saved[1].last_ts > self.RESUME_S:
             return None
         rowid, ep = saved
-        self.db.execute("DELETE FROM episodes WHERE rowid = ?", (rowid,))
+        self.db.execute(f"DELETE FROM {self.table} WHERE rowid = ?", (rowid,))
         log.info("RESUME %s %s  after a restart", key[0], key[1])
         return ep
 
@@ -136,7 +137,7 @@ class Episodes:
         if ep is None:
             return
         self.db.execute(
-            "INSERT INTO episodes (pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, "
+            f"INSERT INTO {self.table} (pair, direction, start_ts, end_ts, n_obs, max_top_edge, max_profit, "
             "max_size, first_profit, cost_at_max, days_to_resolve, cut) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (key[0], key[1], ep.start_ts, ts, ep.n_obs, ep.max_top_edge, ep.max_profit,
              ep.max_size, ep.first_profit, ep.cost_at_max, ep.days, 1 if cut else None),
@@ -435,7 +436,14 @@ def make_scanner(cfg: Config, db: sqlite3.Connection, client, stream: bool | Non
         kfeed = KalshiFeed(cfg.kalshi_ws_url, KalshiSigner.from_file(cfg.kalshi_key_id, cfg.kalshi_private_key_path),
                            noop, noop)
         pfeed = PMFeed(cfg.pmus_ws_url, PMSigner(cfg.pmus_key_id, cfg.pmus_secret_key), noop)
-        return LiveScanner(cfg, db, kalshi, pm, kfeed, pfeed)
+        nfeed = None
+        if cfg.can_stream_novig:
+            from .auth import NovigSigner
+            from .feeds import NovigFeed
+
+            nfeed = NovigFeed(cfg.novig_ws_url, NovigSigner.from_file(cfg.novig_key_id, cfg.novig_private_key_path),
+                              noop)
+        return LiveScanner(cfg, db, kalshi, pm, kfeed, pfeed, nfeed)
     return Scanner(cfg, db, kalshi, pm)
 
 

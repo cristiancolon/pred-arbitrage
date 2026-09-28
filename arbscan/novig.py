@@ -13,15 +13,29 @@ DET, "OAK" is Oakland's moneyline).
 Fees: game markets charge takers ``0.03 * p * (1 - p)`` only while the event is live,
 so a fill before the game starts is free; season futures charge ``0.06`` always.
 Each market carries its own schedule in ``fee``.
+
+Keys (https://docs.novig.com/api/api-keys): the account's ``management`` key, made in
+the web app, opens subaccounts and issues their keys. arbscan streams books with a
+``trading::read`` key, which can't place orders or move money; ``issue_read_key``
+opens a subaccount for it (the subaccount's own ``trading`` key is saved beside the
+management key, never on the scanning machine).
 """
 
+import json
+import os
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .http import Api
+import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+
+from .auth import NovigSigner
+from .http import Api, ApiError
 
 CONTRACT = 100  # Novig contracts (1 cent each) per $1 contract
 PAGE = 500
@@ -116,6 +130,69 @@ class Novig:
 
     async def book(self, market_id: str) -> dict[str, Any]:
         return await self.api.get(f"/v3/public/catalog/markets/{market_id}/book")
+
+
+class NovigAccount:
+    """Signed calls on a Novig account. No retries: opening a subaccount or issuing a
+    key isn't idempotent, so a retried request could do it twice."""
+
+    def __init__(self, client: httpx.AsyncClient, base: str, signer: NovigSigner):
+        self.client, self.base, self.signer = client, base.rstrip("/"), signer
+
+    async def call(self, method: str, path: str, body: Any = None) -> Any:
+        data = json.dumps(body, separators=(",", ":")).encode() if body is not None else b""
+        headers = self.signer.headers(method, path, data)  # signs these exact bytes
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        r = await self.client.request(method, self.base + path, content=data, headers=headers)
+        if r.status_code >= 400:
+            raise ApiError(f"novig {method} {path}: HTTP {r.status_code}: {r.text[:300]}", r.status_code)
+        return r.json() if r.content else None
+
+
+def key_algorithm(public_pem: str) -> str:
+    key = serialization.load_pem_public_key(public_pem.encode())
+    if isinstance(key, ed25519.Ed25519PublicKey):
+        return "Ed25519"
+    if isinstance(key, ec.EllipticCurvePublicKey) and key.curve.name == "secp256r1":
+        return "P-256"
+    raise ValueError("Novig keys are Ed25519 or P-256")
+
+
+def new_keypair() -> tuple[bytes, str]:
+    """(private PKCS#8 PEM, public SPKI PEM) of a fresh Ed25519 key."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    private = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+    public = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return private, public.decode()
+
+
+async def issue_read_key(account: NovigAccount, read_public_pem: str, label: str, trading_key_out: Path,
+                         log=print) -> dict[str, str]:
+    """Issue a ``trading::read`` key for ``read_public_pem`` on the subaccount labelled
+    ``label``, opening it first if there's none. Opening one creates its ``trading``
+    key; its private half goes to ``trading_key_out`` (never overwritten) before the
+    call, so a success can't lose it."""
+    echo = await account.call("POST", "/v3/echo", {"arbscan": "signature check"})
+    if echo != {"arbscan": "signature check"}:
+        raise ApiError(f"novig echo returned {echo!r}")
+    log("management key signs correctly")
+    sub = next((s for s in await account.call("GET", "/v3/account/subaccounts") if s.get("label") == label), None)
+    if sub is None:
+        private, public = new_keypair()
+        fd = os.open(trading_key_out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(private)
+        sub = await account.call("POST", "/v3/account/subaccounts",
+                                 {"label": label, "publicKey": public, "algorithm": "Ed25519"})
+        log(f"opened subaccount {label!r} ({sub['keyId']}); its trading key is in {trading_key_out}")
+    else:
+        log(f"using subaccount {label!r} ({sub['keyId']})")
+    made = await account.call("POST", f"/v3/account/subaccounts/{sub['keyId']}/keys", {
+        "name": f"{label}-read", "publicKey": read_public_pem, "algorithm": key_algorithm(read_public_pem),
+        "scope": "trading::read"})
+    return {"subaccount": sub["keyId"], "key_id": made["keyId"], "fingerprint": made["fingerprint"]}
 
 
 def teams(description: str) -> tuple[str, str] | None:
@@ -266,15 +343,22 @@ def row(event: dict[str, Any], market: dict[str, Any], now: float) -> tuple[tupl
     )
 
 
+def asks_from(bids) -> list:
+    """Offers of one outcome from the ``(price, qty)`` bids resting on the other:
+    ``(1 - price, $1 contracts)``, cheapest first."""
+    levels: dict[float, float] = {}
+    for price, qty in bids:
+        p = round(1.0 - float(price), 6)
+        levels[p] = levels.get(p, 0.0) + qty / CONTRACT
+    return sorted(levels.items())
+
+
 def ladders(book: dict[str, Any], yes_id: str, no_id: str) -> tuple[list, list]:
     """(yes_asks, no_asks) in $1 contracts, cheapest first. Buying YES takes the bids
     resting on NO, at 1 - their price."""
-    def asks(bids) -> list:
-        levels: dict[float, float] = {}
-        for o in bids or []:
-            p = round(1.0 - float(o["price"]), 6)
-            levels[p] = levels.get(p, 0.0) + o["qty"] / CONTRACT
-        return sorted(levels.items())
-
     orders = book.get("orders") or {}
-    return asks(orders.get(no_id)), asks(orders.get(yes_id))
+
+    def bids(outcome: str):
+        return ((o["price"], o["qty"]) for o in orders.get(outcome) or [])
+
+    return asks_from(bids(no_id)), asks_from(bids(yes_id))

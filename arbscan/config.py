@@ -29,6 +29,12 @@ class Config:
     novig: bool = True
     novig_base: str = "https://api.novig.com"
     novig_rps: float = 2.0
+    # With a read-only (``trading::read``) key the streaming scanner also watches
+    # Novig's books live (novig_live.py). Issue one with ``arbscan novig-key``.
+    novig_key_id: str = ""
+    novig_private_key_path: str = ""
+    novig_ws_url: str = "wss://api.novig.com/v3/ws"
+    novig_horizon_h: float = 36.0  # pairs whose game starts within this many hours
     # REST requests per second (metadata, and polling when not streaming). Both public
     # APIs sustained 20/s in testing; Polymarket US documents 20/s per IP.
     kalshi_rps: float = 15.0
@@ -118,6 +124,10 @@ class Config:
     def leg_budget(self) -> float | None:
         """Cash available per venue, for sizing each leg."""
         return self.bankroll_usd / 2 if self.bankroll_usd > 0 else None
+
+    @property
+    def can_stream_novig(self) -> bool:
+        return bool(self.novig and self.novig_key_id and self.novig_private_key_path)
 
     @property
     def can_stream(self) -> bool:

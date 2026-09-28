@@ -133,8 +133,29 @@ async def run(cfg: Config, db: sqlite3.Connection, hours: float = 36.0, once: bo
             await asyncio.sleep(max(0.0, every_s - (time.time() - t0)))
 
 
+def report_windows(db: sqlite3.Connection, since: float) -> None:
+    """The streaming scanner's Novig windows (novig_live.py), if it has recorded any."""
+    ws = [dict(r) for r in db.execute("SELECT * FROM novig_windows WHERE start_ts >= ?", (since,))]
+    if not ws:
+        return
+    lasted = sorted(w["end_ts"] - w["start_ts"] for w in ws)
+    print(f"streamed: {len(ws)} windows, peak profit ${sum(w['max_profit'] or 0 for w in ws):,.2f} at $100 a leg; "
+          f"median {lasted[len(lasted) // 2]:.1f}s open, {sum(x >= 1 for x in lasted)} open 1s+")
+    for v, name in (("K", "Kalshi"), ("P", "Polymarket US")):
+        vw = [w for w in ws if w["pair"].startswith(f"{v}:")]
+        if vw:
+            print(f"  Novig–{name}: {len(vw)} windows, ${sum(w['max_profit'] or 0 for w in vw):,.2f}, "
+                  f"best edge {100 * max(w['max_top_edge'] or 0 for w in vw):+.1f}c")
+    top = sorted(ws, key=lambda w: -(w["max_profit"] or 0))[:15]
+    for w in top:
+        print(f"  ${w['max_profit']:7.2f} {100 * w['max_top_edge']:+5.1f}c  {w['end_ts'] - w['start_ts']:6.1f}s  "
+              f"{w['direction']}  {w['pair'][:90]}")
+    print()
+
+
 def report(db: sqlite3.Connection, hours: float = 24.0) -> None:
     since = time.time() - hours * 3600
+    report_windows(db, since)
     rows = [dict(r) for r in db.execute(
         "SELECT g.*, n.title, n.market_type FROM novig_gaps g JOIN markets n ON n.venue = 'N' AND n.id = g.novig "
         "WHERE g.ts >= ?", (since,))]

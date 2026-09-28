@@ -41,6 +41,7 @@ function LatencyTable({ latency }) {
 }
 
 function DryLimits({ live, orders }) {
+  if (!live) return null;  // still loading
   const lim = live.limits || {};
   const skipped = Object.entries(live.stats || {}).filter(([k]) => !NOT_SKIPS.has(k));
   const pv = orders?.previews || {};

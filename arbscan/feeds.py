@@ -6,7 +6,9 @@ a millisecond of the data arriving instead of waiting for the next poll.
 
 - Kalshi (``orderbook_delta``): a snapshot per market, then signed quantity deltas.
   Every message carries a per-subscription sequence number; a gap means a message
-  was lost, so that subscription is re-created to get fresh snapshots.
+  was lost, so that subscription is re-created to get fresh snapshots. Subscribed
+  with ``use_yes_price``, so NO bids arrive on the YES scale (a NO bid at 30c comes
+  as 0.70); Kalshi will make that the only format, and the books convert them back.
   ``market_lifecycle_v2`` reports markets pausing, closing and settling.
 - Polymarket US (``SUBSCRIPTION_TYPE_MARKET_DATA``): every message is the market's
   full top-of-book ladder plus its trading state, so there is nothing to sequence.
@@ -35,12 +37,13 @@ PM_WS_PATH = "/v1/ws/markets"
 RECONNECT_MAX_S = 30.0
 
 
-def _levels(raw: Iterable) -> dict[float, float]:
+def _levels(raw: Iterable, yes_scale: bool = False) -> dict[float, float]:
+    """Price -> contracts. ``yes_scale``: NO bids quoted as YES prices, stored as NO prices."""
     out = {}
     for p, q in raw or ():
         q = float(q)
         if q > 0:
-            out[round(float(p), 4)] = q
+            out[round(1.0 - float(p) if yes_scale else float(p), 4)] = q
     return out
 
 
@@ -54,7 +57,7 @@ class KalshiBook:
 
     def __init__(self) -> None:
         self.yes: dict[float, float] = {}  # YES bids: price -> contracts
-        self.no: dict[float, float] = {}
+        self.no: dict[float, float] = {}  # NO bids, at NO prices
         self.ready = False
         self.exch_ts: float | None = None
         self.recv_ts = 0.0
@@ -65,13 +68,14 @@ class KalshiBook:
 
     def snapshot(self, msg: dict, recv: float) -> None:
         self.yes = _levels(msg.get("yes_dollars_fp"))
-        self.no = _levels(msg.get("no_dollars_fp"))
+        self.no = _levels(msg.get("no_dollars_fp"), yes_scale=True)
         self.ready, self.recv_ts, self.stamped, self._ladders = True, recv, False, None
         self._tops = (None, None)  # after a (re)subscribe, count steadiness from the snapshot
 
     def delta(self, msg: dict, recv: float) -> None:
-        side = self.yes if msg.get("side") == "yes" else self.no
-        p = round(float(msg["price_dollars"]), 4)
+        yes = msg.get("side") == "yes"
+        side = self.yes if yes else self.no
+        p = round(float(msg["price_dollars"]) if yes else 1.0 - float(msg["price_dollars"]), 4)
         q = side.get(p, 0.0) + float(msg["delta_fp"])
         if q > 1e-9:
             side[p] = q
@@ -297,7 +301,8 @@ class KalshiFeed(_Feed):
             self._pending[cid] = chunk
             self._requested.update(chunk)
             await self._send({"id": cid, "cmd": "subscribe",
-                              "params": {"channels": ["orderbook_delta"], "market_tickers": chunk}})
+                              "params": {"channels": ["orderbook_delta"], "market_tickers": chunk,
+                                         "use_yes_price": True}})
 
     async def _sync(self) -> None:
         if self.ws is None:

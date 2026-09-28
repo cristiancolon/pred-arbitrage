@@ -45,9 +45,11 @@ def test_signers_produce_verifiable_signatures():
 
 def test_kalshi_book_applies_deltas():
     b = KalshiBook()
-    b.snapshot({"yes_dollars_fp": [["0.4000", "10.00"]], "no_dollars_fp": [["0.5500", "5.00"], ["0.5000", "7.00"]]}, 0)
+    # Kalshi quotes NO bids on the YES scale (use_yes_price): these are NO bids at 55c and 50c.
+    b.snapshot({"yes_dollars_fp": [["0.4000", "10.00"]], "no_dollars_fp": [["0.4500", "5.00"], ["0.5000", "7.00"]]}, 0)
+    assert b.no == {0.55: 5.0, 0.5: 7.0}
     assert b.ladders() == ([(0.45, 5.0), (0.5, 7.0)], [(0.6, 10.0)])  # YES asks from NO bids
-    b.delta({"price_dollars": "0.5500", "delta_fp": "-5.00", "side": "no", "ts_ms": 1000}, 1.5)
+    b.delta({"price_dollars": "0.4500", "delta_fp": "-5.00", "side": "no", "ts_ms": 1000}, 1.5)
     b.delta({"price_dollars": "0.4200", "delta_fp": "3.00", "side": "yes", "ts_ms": 1000}, 1.5)
     assert b.ladders() == ([(0.5, 7.0)], [(0.58, 3.0), (0.6, 10.0)])
     assert b.exch_ts == 1.0
@@ -94,7 +96,7 @@ class FakeKalshiServer:
                     await self.send(ws, "ok", {"market_tickers": state["markets"]}, cid=cmd["id"])
                 for t in tickers:
                     await self.send(ws, "orderbook_snapshot", {"market_ticker": t, "yes_dollars_fp": [["0.3500", "100"]],
-                                                               "no_dollars_fp": [["0.6000", "20"]]})
+                                                               "no_dollars_fp": [["0.4000", "20"]]})  # NO bid at 60c
             elif cmd["cmd"] == "update_subscription" and params.get("action") == "delete_markets":
                 state["markets"] = [t for t in state["markets"] if t not in params["market_tickers"]]
                 await self.send(ws, "ok", {"market_tickers": state["markets"]}, cid=cmd["id"])
@@ -124,9 +126,11 @@ def test_kalshi_feed_merged_subscription_gap_and_delete():
             assert server.headers["KALSHI-ACCESS-KEY"] == "kid"
             assert feed.books["A"].ladders()[0] == [(0.4, 20.0)]
             assert feed.stats.reconnects == 0  # acks in the sequence are not gaps
+            books = [c["params"] for c in server.commands if c["params"]["channels"] == ["orderbook_delta"]]
+            assert books and all(p["use_yes_price"] is True for p in books)
 
             ws = server.conns[-1]
-            await server.send(ws, "orderbook_delta", {"market_ticker": "A", "price_dollars": "0.6000", "delta_fp": "-20",
+            await server.send(ws, "orderbook_delta", {"market_ticker": "A", "price_dollars": "0.4000", "delta_fp": "-20",
                                                       "side": "no", "ts_ms": int(time.time() * 1000)})
             await _wait(lambda: feed.books["A"].ladders()[0] == [])
             assert feed.stats.lags
@@ -218,7 +222,7 @@ def _pm(sc, bids, offers, state="MARKET_STATE_OPEN"):
 def test_live_scanner_prices_on_every_update(tmp_path):
     sc, db = _live(tmp_path)
     kb = sc.kfeed.books.setdefault("K-1", KalshiBook())
-    kb.snapshot({"yes_dollars_fp": [["0.3500", "100"]], "no_dollars_fp": [["0.6000", "20"]]}, time.time())
+    kb.snapshot({"yes_dollars_fp": [["0.3500", "100"]], "no_dollars_fp": [["0.4000", "20"]]}, time.time())
     sc._on_kalshi("K-1")
     assert sc.pair_state["K-1|p-1"]["status"] == "paused"  # no Polymarket book yet
 

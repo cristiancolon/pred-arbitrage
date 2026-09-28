@@ -21,10 +21,11 @@ DAY = 86400
 
 
 def kbook(no_bids: dict[float, float], yes_bids: dict[float, float] | None = None) -> KalshiBook:
-    """A Kalshi book: YES asks are the complement of the NO bids, and vice versa."""
+    """A Kalshi book: YES asks are the complement of the NO bids, and vice versa.
+    Kalshi quotes NO bids on the YES scale (use_yes_price)."""
     b = KalshiBook()
     b.snapshot({"yes_dollars_fp": [[str(p), str(q)] for p, q in (yes_bids or {}).items()],
-                "no_dollars_fp": [[str(p), str(q)] for p, q in no_bids.items()]}, time.time())
+                "no_dollars_fp": [[f"{1 - p:.4f}", str(q)] for p, q in no_bids.items()]}, time.time())
     return b
 
 
@@ -256,13 +257,13 @@ def test_a_level_that_came_and_went_is_not_counted(tmp_path):
 
     async def run():
         h.offer()
-        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"], ["0.56", "80"]]},
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.45", "20"], ["0.44", "80"]]},
                                  time.time())  # 80 more at 44c for a moment
         h.offer()
-        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"]]}, time.time())
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.45", "20"]]}, time.time())
         h.offer()
         await asyncio.sleep(0.11)
-        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.55", "20"], ["0.56", "80"]]},
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.45", "20"], ["0.44", "80"]]},
                                  time.time())  # back just as we look again
         h.offer()
         await asyncio.gather(*h.trader.tasks)
@@ -323,7 +324,7 @@ def test_a_price_that_just_moved_holds_the_trade(tmp_path):
         h.offer()  # Kalshi's price is new
         assert not h.trader.tasks and 0 < h.woken[-1][1] <= 0.16  # look again once Kalshi's price has sat 0.15 s
         await asyncio.sleep(0.08)
-        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.555", "100"]]}, time.time())
+        h.kbooks["K-1"].snapshot({"yes_dollars_fp": [], "no_dollars_fp": [["0.445", "100"]]}, time.time())
         h.kbooks["K-1"].ladders()  # the scanner prices it: Kalshi moved again
         h.offer()
         assert not h.trader.tasks
@@ -361,10 +362,10 @@ def test_kalshi_price_moves_are_timed_when_priced(tmp_path):
     b = kbook({0.55: 100})
     b.ladders()
     t0 = b.top_ts[0]
-    b.delta({"side": "no", "price_dollars": "0.55", "delta_fp": "5"}, t0 + 5)  # more size, same price
+    b.delta({"side": "no", "price_dollars": "0.45", "delta_fp": "5"}, t0 + 5)  # more size, same price
     b.ladders()
     assert b.top_ts[0] == t0
-    b.delta({"side": "no", "price_dollars": "0.56", "delta_fp": "5"}, t0 + 7)  # a better offer: YES at 44c
+    b.delta({"side": "no", "price_dollars": "0.44", "delta_fp": "5"}, t0 + 7)  # a better offer: YES at 44c
     b.ladders()
     assert b.top_ts[0] == t0 + 7
 

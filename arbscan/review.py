@@ -64,11 +64,13 @@ def record(db: sqlite3.Connection, kalshi: str, pm: str, decision: str, source: 
 
 def decide(cfg: Config, db: sqlite3.Connection, kalshi: str, pm: str, decision: str,
            source: str = "human", note: str | None = None, commit: bool = True) -> None:
-    """Record a review decision; approvals are appended to pairs.csv."""
+    """Record a review decision; approvals are appended to pairs.csv. An approval is
+    committed first, whatever ``commit`` says, so a process killed in between can't
+    leave a pair in pairs.csv with no decision behind it."""
     if decision not in ("same", "inverse", "reject"):
         raise ValueError(decision)
     record(db, kalshi, pm, decision, source)
-    if commit:
+    if commit or decision != "reject":
         db.commit()
     if decision != "reject":
         if note is None:

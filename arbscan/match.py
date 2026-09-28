@@ -705,12 +705,25 @@ def run(cfg: Config, db: sqlite3.Connection) -> list[Candidate]:
 
 def _approved(cfg: Config, db: sqlite3.Connection) -> dict[str, list[Pair]]:
     """Pairs in pairs.csv that Jev or an auto-approve rule approved, by Kalshi ticker.
-    A person's approval stands."""
-    auto = {(r[0], r[1]) for r in db.execute(
-        "SELECT kalshi, pm FROM decisions WHERE decision IN ('same', 'inverse') AND source IN ('jev', 'rule')")}
+    A person's approval stands.
+
+    A review killed between appending a pair and committing its decision (possible
+    until 2026-09-28) left pairs with no decision row; their note ("jev:0.85",
+    "auto:KXMLBGAME") says who approved them, and the decision is recorded here."""
+    decided = {(r[0], r[1]): (r[2], r[3]) for r in db.execute("SELECT kalshi, pm, decision, source FROM decisions")}
+    pairs = load_pairs(cfg.pairs_path)
+    now = time.time()
+    missing = [(p.kalshi, p.pm, p.relation, now, "jev" if p.note.startswith("jev:") else "rule")
+               for p in pairs if (p.kalshi, p.pm) not in decided and p.note.startswith(("jev:", "auto:"))]
+    if missing:
+        db.executemany("INSERT INTO decisions (kalshi, pm, decision, ts, source) VALUES (?,?,?,?,?)", missing)
+        db.commit()
+        log.info("recorded the missing decisions of %d approved pairs in %s", len(missing), cfg.pairs_path)
+        decided.update({(m[0], m[1]): (m[2], m[4]) for m in missing})
     out: dict[str, list[Pair]] = defaultdict(list)
-    for p in load_pairs(cfg.pairs_path):
-        if (p.kalshi, p.pm) in auto:
+    for p in pairs:
+        decision, source = decided.get((p.kalshi, p.pm), (None, None))
+        if decision in ("same", "inverse") and source in ("jev", "rule"):
             out[p.kalshi].append(p)
     return out
 
@@ -819,8 +832,9 @@ def auto_approve(cfg: Config, db: sqlite3.Connection, cands: list[Candidate], k_
         for rule in cfg.auto_approve:
             if (k_series.get(c.kalshi) == rule.kalshi_series and c.pm.startswith(rule.pm_slug_prefix)
                     and c.score >= rule.min_score and (c.relation == "same" or rule.allow_inverse)):
-                append_pair(cfg.pairs_path, c.kalshi, c.pm, c.relation, f"auto:{rule.kalshi_series}")
                 record(db, c.kalshi, c.pm, c.relation, "rule")
+                db.commit()  # before pairs.csv, so the pair never lacks its decision
+                append_pair(cfg.pairs_path, c.kalshi, c.pm, c.relation, f"auto:{rule.kalshi_series}")
                 n += 1
                 break
     db.commit()

@@ -297,3 +297,30 @@ def test_a_persons_approval_stands(tmp_path):
     db.execute("UPDATE markets SET start_ts = start_ts - 3 * 3600 WHERE id = 'aec-mlb-bal-nyy-2026-09-25'")
     match.run(cfg, db)
     assert len(load_pairs(cfg.pairs_path)) == 1
+
+
+def test_an_approval_is_committed_before_it_reaches_pairs_csv(tmp_path):
+    import sqlite3
+
+    from arbscan.review import decide
+
+    db = _catalog(tmp_path, [_bal(), _bal_pm(GAME_2)])
+    cfg = Config(pairs_path=str(tmp_path / "pairs.csv"))
+    decide(cfg, db, "KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25", "same", source="jev",
+           commit=False)  # Jev batches its commits; an approval must not wait for the batch
+    other = sqlite3.connect(str(tmp_path / "c.db"))
+    assert other.execute("SELECT decision, source FROM decisions").fetchall() == [("same", "jev")]
+
+
+def test_a_pair_left_without_its_decision_is_rechecked_too(tmp_path):
+    from arbscan.pairs import append_pair, load_pairs
+
+    db = _catalog(tmp_path, [_bal(), _bal_pm(GAME_2 - 3 * 3600)])
+    cfg = Config(pairs_path=str(tmp_path / "pairs.csv"), match_min_score=0.2)
+    # In pairs.csv but not in decisions, as a review killed mid-batch left 24 pairs on 2026-09-26.
+    append_pair(cfg.pairs_path, "KXMLBGAME-26SEP251905BALNYY-BAL", "aec-mlb-bal-nyy-2026-09-25", "same", "jev:0.85")
+    append_pair(cfg.pairs_path, "KXMLBGAME-26SEP251905BALNYY-NYY", "aec-mlb-bal-nyy-2026-09-25", "inverse", "by hand")
+    match.run(cfg, db)
+    assert [p.note for p in load_pairs(cfg.pairs_path)] == ["by hand"]  # a person's pair isn't touched
+    assert [tuple(r) for r in db.execute("SELECT kalshi, decision, source, note FROM decisions")] == \
+        [("KXMLBGAME-26SEP251905BALNYY-BAL", "reject", "recheck", "start times 3.0h apart")]

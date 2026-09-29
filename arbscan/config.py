@@ -125,6 +125,14 @@ class Config:
     web_token: str = ""
     refresh_interval_h: float = 1.0
 
+    # Storage (retention.py): every hour `arbscan serve` deletes raw streaming history
+    # (quotes, opportunities, sweeps) older than keep_raw_days, and older hours too if the
+    # database would otherwise pass max_db_gb (never the last day). Windows, trades,
+    # orders, results and the catalog are always kept. A week of raw history was ~20 GB
+    # in late September 2026. 0 turns either limit off.
+    keep_raw_days: float = 7.0
+    max_db_gb: float = 25.0
+
     # Live discovery (discover.py): between full refreshes, check both venues for newly
     # listed markets this often and match, review and pair them straight away.
     discovery: bool = True

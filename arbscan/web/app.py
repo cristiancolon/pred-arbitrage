@@ -84,12 +84,13 @@ class Hub:
 
 
 class Service:
-    def __init__(self, cfg: Config, scanner: Scanner, job: RefreshJob, hub: Hub, discovery=None):
+    def __init__(self, cfg: Config, scanner: Scanner, job: RefreshJob, hub: Hub, discovery=None, pruner=None):
         self.cfg = cfg
         self.scanner = scanner
         self.job = job
         self.hub = hub
         self.discovery = discovery
+        self.pruner = pruner
         self.pipeline: dict = {}
         self.titles: dict[str, dict] = {}
         self.rules = bankroll.PickRules.from_config(cfg)
@@ -159,6 +160,7 @@ class Service:
             "closest": closest,
             "job": self.job.snapshot(),
             "discovery": self.discovery.snapshot() if self.discovery else None,
+            "storage": self.pruner.snapshot() if self.pruner else None,
             "pipeline": self.pipeline,
             "features": {"jev": bool(jev.api_key(self.cfg))},
             "bankroll": self.cfg.bankroll_usd,

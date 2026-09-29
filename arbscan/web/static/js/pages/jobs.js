@@ -24,6 +24,26 @@ function Discovery({ d, stats, now }) {
   <//>`;
 }
 
+const gb = (b) => (b == null ? "—" : `${(b / 1e9).toFixed(1)} GB`);
+
+function Storage({ s, now }) {
+  if (!s) return null;
+  if (!s.enabled) return html`<${Card} title="Storage"><div class="muted">Nothing is deleted (keep_raw_days and max_db_gb are 0 in config.toml). Database ${gb(s.file_bytes)}.</div><//>`;
+  const last = s.last;
+  const deleted = last?.deleted ? Object.values(last.deleted).reduce((a, b) => a + b, 0) : 0;
+  const window = s.keep_days > 0 ? `${s.keep_days} days` : "no time limit";
+  return html`<${Card} title="Storage"
+    sub=${`Raw streaming history (quotes, opportunities, sweeps) is kept ${s.keep_days > 0 ? `for ${s.keep_days} days` : "until the cap"}${s.max_gb > 0 ? `, and less if the database would pass ${s.max_gb} GB` : ""}. Windows, trades, orders and results are always kept. Checked every hour.`}>
+    <dl class="facts">
+      <dt>Database</dt><dd>${gb(s.file_bytes)} on disk${s.used_bytes != null ? ` · ${gb(s.used_bytes)} in use` : ""}${s.max_gb > 0 ? ` · cap ${s.max_gb} GB` : ""}</dd>
+      <dt>Window</dt><dd>${window}${s.oldest ? ` · oldest raw data ${dateTime(s.oldest)}` : ""}</dd>
+      <dt>Last check</dt><dd>${last ? (last.error ? html`<span style="color:var(--critical)">failed ${ago(last.ts, now)}: ${last.error}</span>`
+        : `${ago(last.ts, now)} · ${deleted ? `${int(deleted)} rows deleted in ${duration(last.took_s)}` : "nothing old enough to delete"}`) : "—"}</dd>
+      <dt>Next check</dt><dd>${until(s.next, now)}</dd>
+    </dl>
+  <//>`;
+}
+
 const STAGE_INFO = {
   catalog: "Download every open market on both venues",
   match: "Suggest equivalent pairs; apply auto-approve rules",
@@ -94,7 +114,8 @@ export function Jobs() {
       <//>
     </div>
     <${Discovery} d=${state?.discovery} stats=${pipeline?.discovery} now=${now} />
-    <${Card} title="Log" sub="Output of the refresh job and live discovery, streamed live" flush>
+    <${Storage} s=${state?.storage} now=${now} />
+    <${Card} title="Log" sub="Output of the refresh job, live discovery and storage pruning, streamed live" flush>
       <div class="console" ref=${consoleRef} role="log" aria-live="polite"
         onScroll=${(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30; }}>
         ${lines.length ? lines.map((l) => html`<div class="line"><span class="ts">${clock(l.ts)}</span><span class="stage-tag">${l.stage || "job"}</span><span class="text">${l.text}</span></div>`)

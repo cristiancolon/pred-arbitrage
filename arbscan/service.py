@@ -14,6 +14,7 @@ from .config import Config
 from .http import make_client
 from .jobs import Daemon, RefreshJob
 from .results import ResultsRecorder
+from .retention import Pruner
 from .scanner import make_scanner, run_loop
 from .web.app import Hub, Service, create_app
 
@@ -57,9 +58,10 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
                      cfg.refresh_interval_h * 3600, last_catalog, hub.publish, stages=stages)
     discovery = (Daemon(os.path.abspath(config_path) if config_path else None, "discover", "discover",
                         job._line, hub.publish) if cfg.discovery else None)
+    pruner = Pruner(cfg.db_path, cfg.keep_raw_days, cfg.max_db_gb, job._line)
     async with make_client() as client:
         scanner = make_scanner(cfg, db, client)
-        svc = Service(cfg, scanner, job, hub, discovery)
+        svc = Service(cfg, scanner, job, hub, discovery, pruner)
         scanner.listeners.append(svc.on_sweep)
         # Open dashboards hold event streams; don't let them keep the service from stopping.
         server = _Server(uvicorn.Config(create_app(svc), host=cfg.web_host, port=cfg.web_port, timeout_graceful_shutdown=3,
@@ -68,6 +70,7 @@ async def serve(cfg: Config, config_path: str | None, db: sqlite3.Connection, ru
         tasks = [
             job.scheduler(stop),
             svc.maintain(stop),
+            pruner.run(stop),
             _web(server, stop, f"http://{host}:{cfg.web_port}/"),
         ]
         if run_scanner:

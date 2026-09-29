@@ -37,7 +37,7 @@ def test_the_guard_passes_nothing_until_it_has_read_the_records_and_the_account(
     g = ready_guard(h.cfg, h.kmeta)
     assert g(PAIR, 0.5) is None
     for change, why in ((lambda g: setattr(g, "held", {"p-1"}), "account holds a position"),
-                        (lambda g: setattr(g, "lost_today", 5.0), "daily loss limit"),
+                        (lambda g: setattr(g, "lost_today", g.cfg.live_daily_loss_usd), "daily loss limit"),
                         (lambda g: setattr(g, "attested_until", time.time() + 3600), "Kalshi location check lapsing"),
                         (lambda g: setattr(g, "shard_cash", {0: 0.5, 3: 100.0}), "no cash on Kalshi shard 0"),
                         (lambda g: setattr(g, "series", {"KXNFLREC"}), "series without a clean record")):

@@ -96,13 +96,13 @@ class Config:
     # is sent. A pick must come from a series with at least live_series_min_settled
     # settled pairs, none conflicting and at most live_series_max_void voided; one
     # trade costs at most live_max_stake_usd and must be expected to make
-    # live_min_profit_usd; no new trade once today's settled trades lost
-    # live_daily_loss_usd.
+    # live_min_profit_usd; no new trade once today's trades have lost
+    # live_daily_loss_usd, net of today's gains, across both venues together.
     dry_run: bool = True
     live_bankroll_usd: float = 100.0
     live_max_stake_usd: float = 10.0
     live_min_profit_usd: float = 0.05
-    live_daily_loss_usd: float = 5.0
+    live_daily_loss_usd: float = 10.0
     live_series_min_settled: int = 20
     live_series_max_void: float = 0.02
     # Live trading (livetrade.py): the dry run's picks traded with real orders, under the

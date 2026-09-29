@@ -11,7 +11,7 @@ const PAGES = {
   overview: { title: "Overview", sub: "Pipeline status, and how close the two venues come to an arbitrage", icon: "overview", el: Overview },
   pairs: { title: "Pairs", sub: "Approved Kalshi ↔ Polymarket US pairs and their live prices", icon: "pairs", el: Pairs },
   opportunities: { title: "Opportunities", sub: "Every window that was profitable after fees", icon: "zap", el: Opportunities },
-  paper: { title: "Paper trading", sub: "Acting on picks with real fees and measured latency, without placing orders", icon: "play", el: Paper },
+  paper: { title: "Trading", sub: "Picks traded by the paper, dry-run and live accounts, with real fees and measured latency", icon: "play", el: Paper },
   jobs: { title: "Refresh job", sub: "Market catalog and pair matching, on a schedule", icon: "jobs", el: Jobs },
 };
 

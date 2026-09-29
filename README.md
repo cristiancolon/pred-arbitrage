@@ -203,8 +203,8 @@ held to the limits a first, capped live run would have:
   (`live_series_min_settled`, `live_series_max_void`). A mismatched pair looks like an
   arb, so it gets picked far more often than it occurs.
 - At most $10 a trade for both legs (`live_max_stake_usd`), expected to make 5¢ or more
-  (`live_min_profit_usd`), and no new trade once today's settled trades have lost $5
-  (`live_daily_loss_usd`).
+  (`live_min_profit_usd`), and no new trade once today's trades have lost $10, net of
+  today's gains, across both venues together (`live_daily_loss_usd`).
 - No market the account already holds a position in (it may be one taken by hand).
 - No Kalshi market on an exchange shard without cash: Kalshi fills an order only from
   the cash on its market's shard, and new baseball, tennis and basketball events live

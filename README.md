@@ -227,9 +227,15 @@ book, and prices within 3¢ of 0 or 1. Without `--send` it only shows the orders
 Polymarket US previews them. With `--send` these are real orders: a round trip costs
 the spread plus two taker fees, a few cents.
 
-Before trading live on Polymarket US, note its Participant Agreement §19: "You shall not
-access or use the System in a live production environment unless and until you have
-received written approval to do so from Polymarket US."
+Before trading live:
+- **Kalshi:** put cash on every shard you'll trade. Kalshi can keep a target split of
+  cash across shards for you (`POST /portfolio/target_balance_allocation`).
+- **Polymarket US:** its Participant Agreement §19 requires its API conformance
+  procedures and written approval before live use. Its docs put individual traders on
+  the self-serve retail API (identity verification, then a key from
+  polymarket.us/developer); the approval process is for institutions. Its rulebook
+  (5.2(h) and (i)) requires automated traders to keep an audit trail of their orders
+  and to have order throttles, price collars and kill switches.
 
 ### What the numbers do *not* include
 

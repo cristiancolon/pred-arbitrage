@@ -3,7 +3,8 @@
 A scanner that measures how much cross-venue arbitrage actually exists between
 **Kalshi** and **Polymarket US**. The scanner and the dashboard never place orders, and
 need no exchange API keys: both venues publish market data publicly. The only code that
-can trade is `arbscan order-test --send` ([Dry run and live orders](#dry-run-and-live-orders)).
+can trade is `arbscan order-test --send` and the live trader, which is off unless
+switched on ([Dry run and live orders](#dry-run-and-live-orders)).
 An optional TypeSafe API key lets the Jev model review suggested pairs for you.
 
 The point is to answer "is there money here?" with data before writing any trading code.
@@ -237,6 +238,44 @@ Before trading live:
   (5.2(h) and (i)) requires automated traders to keep an audit trail of their orders
   and to have order throttles, price collars and kill switches.
 
+### Live trading
+
+**The live trader** (`live_trading = true`, off by default; `arbscan/livetrade.py`)
+trades the dry run's picks with real orders, from its own account (`live_trades`, the
+same `live_bankroll_usd`, half a venue) and under the same limits, plus a few of its
+own:
+
+- One trade at a time, at most `live_max_trades_per_day` (50) a day.
+- Each pick is sized to the smaller of the account's cash and what the venue really
+  holds: on Kalshi, the cash on the shard of the pick's market. Balances and positions
+  are re-read every 30 seconds and after each trade.
+- Nothing is sent while either leg's feed connection is down or has been quiet for
+  5 seconds.
+- Today's losses count the moment they happen (a leg sold back at a loss, a trade
+  settling).
+
+A trade sends one leg first (the one whose price moved most recently), then the other
+for what that filled. If the second leg comes up short, it buys the rest at up to
+break-even; whatever is still unhedged is sold back, no lower than
+`live_unwind_max_loss` (10¢) under what it cost. An order is never sent twice: one
+whose reply is lost (a timeout, a 5xx) is read back from the venue's position. Every
+order is written to `data/live_journal.jsonl` before it goes out and again once its
+outcome is known, and kept in `live_orders` (mode `live`).
+
+**It stops itself** by writing `data/live.halt`, with the reason, when:
+- a position is left unhedged;
+- an order's outcome can't be read back;
+- three orders in a row are rejected;
+- it starts up with an order in the journal whose outcome it never learned (a crash
+  mid-trade).
+
+The stop outlasts restarts. The commands:
+- `arbscan live-check` shows what it would start with (limits, the stop, cash per
+  Kalshi shard, positions) and only reads.
+- `arbscan live-halt` stops it by hand, within 2 seconds.
+- `arbscan live-resume` lets it go on once the positions have been checked (add
+  `--checked` when the journal lists orders with no known outcome).
+
 ### What the numbers do *not* include
 
 - **Execution risk.** The two legs can't be filled atomically. By the time you act,
@@ -274,7 +313,8 @@ Nothing needs a button press: new markets flow through to the scanner on their o
   count what their markets really paid, and the page shows how much that moved the
   P&L from $1 a pair, with voided and mismatched trades flagged. Switch to the dry run
   to see what a capped live run would have done, the orders it wrote out, and
-  Polymarket US's verdict on them.
+  Polymarket US's verdict on them; switch to Live for the live trader's real trades,
+  whether it's trading or stopped (and why), and its orders.
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without
@@ -535,7 +575,6 @@ one starting.
 - **Real-time data.** Kalshi's and Polymarket US's WebSocket feeds need API keys.
   They're worth adding only if the report shows windows short enough that 3-second
   polling misses them.
-- **Execution.** The order clients and the dry run exist (above); a capped live run
-  comes after the dry run and a one-contract `order-test` on each venue check out. The
-  obvious first improvement after that is posting a maker order on one leg and taking
+- **Execution.** The order clients, the dry run and the live trader exist (above). The
+  obvious first improvement is posting a maker order on one leg and taking
   on the other: it saves one taker fee, and Polymarket US pays makers a rebate.

@@ -196,10 +196,11 @@ def test_pm_feed_books_state_and_reconnect():
     asyncio.run(asyncio.wait_for(main(), 30))
 
 
-def _live(tmp_path, relation="same"):
+def _live(tmp_path, relation="same", **settings):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     pairs = tmp_path / "pairs.csv"
     append_pair(str(pairs), "K-1", "p-1", relation)
-    cfg = Config(db_path=str(tmp_path / "l.db"), pairs_path=str(pairs))
+    cfg = Config(db_path=str(tmp_path / "l.db"), pairs_path=str(pairs), **settings)
     db = connect(cfg.db_path)
     noop = lambda *_: None  # noqa: E731
     kfeed = KalshiFeed("ws://unused", KalshiSigner("kid", rsa_pem()), noop, noop)

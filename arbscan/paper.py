@@ -143,6 +143,7 @@ class Watch:
     due: float  # when it may next be considered for a trade
     seen: deque = field(default_factory=deque)  # (ts, Kalshi ladder, Polymarket ladder)
     woken: float = 0.0  # when the re-check already scheduled fires
+    refused: str | None = None  # the guard's latest passing refusal, counted once per window
 
     def add(self, ts: float, kl, pl, keep: float) -> None:
         self.seen.append((ts, kl[:WATCH_LEVELS], pl[:WATCH_LEVELS]))
@@ -309,13 +310,16 @@ class PaperTrader:
             return
         why = self.guard(pair, days) if self.guard is not None else None
         if why:
-            self.stats[why] += 1
-            self.traded[key] = window
+            if why != w.refused:
+                self.stats[why] += 1
+            if why in getattr(self.guard, "transient", ()):
+                # It may pass in a moment (another trade finishing, a feed catching up).
+                w.refused, w.due = why, now + RECHECK_S
+                self._wake(pair, w, now)
+            else:
+                self.traded[key] = window
             return
-        # Each venue's money is cash plus what's tied up in open positions; one pick gets
-        # at most its stake cap of that, less the longer it locks the money up.
-        cap = self.rules.stake_fraction(days)
-        budget = {v: min(self.available(v), cap * (self.cash[v] + self.tied[v])) for v in VENUES}
+        budget = self._budget(pair, days)
         if min(budget.values()) < 1.0:
             self.stats["no cash"] += 1
             self.traded[key] = window
@@ -355,6 +359,13 @@ class PaperTrader:
             self._execute(trade, pair.kalshi, pair.pm, k_coef, p_coef, reserve, max(0.0, now - seen_ts)))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+
+    def _budget(self, pair, days: float | None) -> dict[str, float]:
+        """What one pick may spend on each venue. Each venue's money is cash plus what's
+        tied up in open positions; one pick gets at most its stake cap of that, less the
+        longer it locks the money up."""
+        cap = self.rules.stake_fraction(days)
+        return {v: min(self.available(v), cap * (self.cash[v] + self.tied[v])) for v in VENUES}
 
     def _wake(self, pair, w: Watch, now: float) -> None:
         """Have the scanner price the pair again when the window is next due, in case

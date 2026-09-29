@@ -18,7 +18,8 @@ def _run(coro):
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="arbscan", description="Kalshi <-> Polymarket US arbitrage scanner. Read-only, except order-test --send.")
+    ap = argparse.ArgumentParser(prog="arbscan", description="Kalshi <-> Polymarket US arbitrage scanner. Read-only, "
+                                 "except order-test --send and live trading once switched on.")
     ap.add_argument("-c", "--config", help="TOML config file (default: ./config.toml if present)")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -51,6 +52,13 @@ def main(argv: list[str] | None = None) -> None:
     ot.add_argument("--market", required=True, help="Kalshi ticker or Polymarket US slug")
     ot.add_argument("--side", choices=["yes", "no", "both"], default="both")
     ot.add_argument("--send", action="store_true", help="place the orders (default: only show them)")
+    sub.add_parser("live-check", help="show what the live trader would start with: limits, stop, cash, positions "
+                                      "(reads only)")
+    lh = sub.add_parser("live-halt", help="stop live trading (the running trader stops within seconds)")
+    lh.add_argument("--reason", default="stopped by hand (arbscan live-halt)")
+    lr = sub.add_parser("live-resume", help="let live trading go on after a stop")
+    lr.add_argument("--checked", action="store_true",
+                    help="orders with no known outcome have been checked on the venues by hand")
     rp = sub.add_parser("report", help="summarize what the scanner found")
     rp.add_argument("--hours", type=float, default=24.0)
     rp.add_argument("--min-profit", type=float, default=0.0, help="ignore windows below this $ profit")
@@ -104,6 +112,15 @@ def main(argv: list[str] | None = None) -> None:
 
             sides = ["yes", "no"] if args.side == "both" else [args.side]
             asyncio.run(ordertest.run(cfg, db, args.venue, args.market, sides, args.send))
+        elif args.cmd in ("live-check", "live-halt", "live-resume"):
+            from . import livetrade
+
+            if args.cmd == "live-check":
+                asyncio.run(livetrade.check(cfg))
+            elif args.cmd == "live-halt":
+                livetrade.halt(cfg, args.reason)
+            elif not livetrade.resume(cfg, args.checked):
+                sys.exit(1)
         elif args.cmd == "report":
             report.run(db, args.hours, args.min_profit, args.top, cfg.bankroll_usd,
                        bankroll.PickRules.from_config(cfg))

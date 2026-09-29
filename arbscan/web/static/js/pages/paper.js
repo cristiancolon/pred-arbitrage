@@ -8,7 +8,9 @@ const VENUE = { K: "Kalshi", P: "Polymarket US" };
 const BOOKS = [
   { value: "paper", label: "Paper", title: "Every pick, with the paper account ($300)" },
   { value: "dry", label: "Dry run", title: "Only what a first, capped live run would take, with its real orders written out" },
+  { value: "live", label: "Live", title: "Real orders: the dry run's picks, traded for real once live trading is switched on" },
 ];
+const NAME = { paper: "Paper", dry: "Dry-run", live: "Live" };
 const NOT_SKIPS = new Set(["sent", "open", "unwound", "missed"]);
 const ms = (v) => (v == null ? "—" : `${Math.round(v)} ms`);
 
@@ -45,8 +47,7 @@ function DryLimits({ live, orders }) {
   const lim = live.limits || {};
   const skipped = Object.entries(live.stats || {}).filter(([k]) => !NOT_SKIPS.has(k));
   const pv = orders?.previews || {};
-  const shards = lim.shard_cash
-    ? Object.entries(lim.shard_cash).map(([s, c]) => `shard ${s}: ${money(c)}`).join(" · ") : "not read yet";
+  const shards = shardText(lim.shard_cash);
   const days = lim.attested_until ? (lim.attested_until - Date.now() / 1000) / 86400 : null;
   const refused = orders?.refused?.[0];
   return html`<${Card} title="Live limits" sub="What a first, capped live run would be held to. Nothing is sent">
@@ -69,12 +70,50 @@ function DryLimits({ live, orders }) {
   <//>`;
 }
 
+function shardText(cash) {
+  return cash ? Object.entries(cash).map(([s, c]) => `shard ${s}: ${money(c)}`).join(" · ") : "not read yet";
+}
+
+function LiveStatus({ live, orders }) {
+  if (!live) return null;  // still loading
+  const lim = live.limits || {};
+  const skipped = Object.entries(live.stats || {}).filter(([k]) => !NOT_SKIPS.has(k));
+  const sent = (v) => {
+    const o = orders?.orders?.[v] || {};
+    const n = Object.values(o).reduce((a, b) => a + b, 0);
+    const bad = (o.rejected || 0) + (o.unknown || 0);
+    return `${int(n)}${bad ? ` (${int(o.rejected || 0)} rejected${o.unknown ? `, ${int(o.unknown)} unknown` : ""})` : ""}`;
+  };
+  const problem = orders?.problems?.[0];
+  return html`<${Card} title="Live trading" sub="Real orders on both venues, under the live limits">
+    ${live.halted
+      ? html`<${Banner} tone="critical"><b>Stopped:</b> ${live.halted}. Check the positions on both venues, then run
+          <code>arbscan live-resume</code> on the machine it runs on.<//>`
+      : html`<div style="padding-bottom:8px"><${Badge} tone="good" icon="check">Trading<//></div>`}
+    <dl class="facts">
+      <dt>Per trade</dt><dd>at most ${money(lim.max_stake, 0)} for both legs, expected to make ${money(lim.min_profit)} or more; one at a time</dd>
+      <dt>Account</dt><dd>${money(live.deposits?.K, 0)} on each venue; no market the account already holds</dd>
+      <dt title="A leg left over is sold back no lower than this under what it cost; if it can't be, trading stops">Sell-back floor</dt>
+      <dd>${cents(lim.unwind_max_loss)} under cost</dd>
+      <dt>Today</dt><dd>${int(lim.trades_today)} of ${int(lim.max_trades)} trades · lost ${money(lim.lost_today)} of the ${money(lim.daily_loss, 0)} limit</dd>
+      <dt title="Since the last restart">Picks the limits skipped</dt>
+      <dd>${skipped.length ? skipped.map(([k, n]) => `${k}: ${int(n)}`).join(" · ") : "none yet"}</dd>
+      <dt title="Kalshi fills an order only from the cash on its market's shard">Kalshi cash by shard</dt><dd>${shardText(lim.shard_cash)}</dd>
+      <dt>Polymarket US buying power</dt><dd>${lim.pm_cash == null ? "not read yet" : money(lim.pm_cash)}</dd>
+      <dt>Orders sent</dt><dd>Kalshi ${sent("K")} · Polymarket US ${sent("P")}</dd>
+    </dl>
+    ${problem ? html`<div class="muted" style="font-size:12px;padding-top:8px">Latest problem: ${VENUE[problem.venue]} ${problem.market}: ${problem.status}${problem.error ? ` (${problem.error})` : ""}</div>` : null}
+  <//>`;
+}
+
 export function Paper() {
   const [hours, setHours] = usePref("range", 24);
   const [book, setBook] = usePref("paperBook", "paper");
   const dry = book === "dry";
+  const real = book === "live";
+  const name = NAME[book] || "Paper";
   const now = useNow(5000);
-  const { data, loading } = useFetch(`/api/paper?hours=${hours}${dry ? "&book=dry" : ""}`, [],
+  const { data, loading } = useFetch(`/api/paper?hours=${hours}${book !== "paper" ? `&book=${book}` : ""}`, [],
     { refreshOn: (s) => Math.floor(s.pairsVersion / 5) });
   const live = data?.live;
   const tot = data?.totals || {};
@@ -82,7 +121,9 @@ export function Paper() {
   const trades = data?.trades || [];
   if (data && !live) {
     return html`<div class="filters"><${Seg} label="Account" options=${BOOKS} value=${book} onChange=${setBook} /></div>
-      <${Banner} tone="info">${dry ? html`The dry run runs with the streaming scanner. Set both venues' API keys, and
+      <${Banner} tone="info">${real ? html`Live trading is off. It trades the dry run's picks with real orders, under the same
+      limits. It's switched on with <code>live_trading = true</code> in config.toml; <code>arbscan live-check</code> shows what
+      it would start with.` : dry ? html`The dry run runs with the streaming scanner. Set both venues' API keys, and
       <code>dry_run = true</code> in config.toml.` : html`Paper trading runs with the streaming scanner. Set both venues' API keys and
       <code>paper_trading = true</code> in config.toml.`}<//>`;
   }
@@ -94,12 +135,14 @@ export function Paper() {
     <div class="filters">
       <${Seg} label="Account" options=${BOOKS} value=${book} onChange=${setBook} />
       <${Seg} label="Time range" options=${RANGES} value=${hours} onChange=${setHours} />
-      <span class="muted" style="font-size:12.5px">${dry
+      <span class="muted" style="font-size:12.5px">${real
+        ? "Real orders: the dry run's picks within the live limits, traded on both venues. Fills, prices and fees are the venues' own."
+        : dry
         ? "Simulated like paper trading, under a capped live run's limits. Every leg is also written out as the real order a live trader would send, and Polymarket US previews the buys. Nothing is sent."
         : "Simulated: no orders are placed. Each pick is filled against the live books as they stood when its orders would have arrived."}</span>
     </div>
     <div class="kpis">
-      <${Tile} label=${dry ? "Dry-run P&L" : "Paper P&L"} value=${money(pnl)}
+      <${Tile} label=${`${name} P&L`} value=${money(pnl)}
         title="Settled trades at their actual result, plus open ones at the profit they locked in (if both legs settle as one bet)"
         foot=${live ? `${money(live.realized)} settled · ${money(live.locked)} locked in on ${int(live.open)} open` : "—"} />
       <${Tile} label="Cash" value=${money(cash)}
@@ -110,14 +153,14 @@ export function Paper() {
       <${Tile} label="Order latency" value=${live ? `${ms(live.latency.K.order_ms)} · ${ms(live.latency.P.order_ms)}` : "—"}
         foot="Kalshi · Polymarket US: seen → order at the book" />
     </div>
-    <${ChartCard} title=${dry ? "Dry-run P&L over time" : "Paper P&L over time"} loading=${loading && data}
+    <${ChartCard} title=${`${name} P&L over time`} loading=${loading && data}
       sub="Cumulative, by when each trade was made: settled trades at their result, open ones at the profit they locked in"
       table=${{ columns: ["Time", "P&L"], rows: (data?.curve || []).slice().reverse().map((p) => [new Date(p[0] * 1000).toLocaleString(), money(p[1])]) }}>
       <${LineChart} series=${series} height=${200} zero=${0} zeroLabel="Break-even" yFmt=${(v) => money(v, Math.abs(v) < 10 ? 2 : 0)}
-        xDomain=${data ? [data.since, now] : undefined} emptyText=${dry ? "No dry-run trades in this range yet" : "No paper trades in this range yet"} />
+        xDomain=${data ? [data.since, now] : undefined} emptyText=${`No ${name.toLowerCase()} trades in this range yet`} />
     <//>
     <div class="grid cols-2 align-start">
-      <${Card} title="Where the expected profit went" sub=${dry ? "All dry-run trades so far" : "All paper trades so far"}>
+      <${Card} title="Where the expected profit went" sub=${`All ${name.toLowerCase()} trades so far`}>
         <dl class="facts">
           <dt>Expected when deciding</dt><dd class="num">${money(tot.planned_profit)}</dd>
           <dt>Taker fees paid</dt><dd class="num">${money(tot.fees)} <span class="muted">(already in the expectation)</span></dd>
@@ -127,7 +170,7 @@ export function Paper() {
           <dt>P&L (settled + locked in)</dt><dd class="num"><b>${money(tot.pnl)}</b></dd>
         </dl>
       <//>
-      ${dry ? html`<${DryLimits} live=${live} orders=${data?.orders} />` : html`<${Card} title="Order latency, as simulated" sub="Measured from this machine every few seconds, without placing orders" flush>
+      ${real ? html`<${LiveStatus} live=${live} orders=${data?.orders} />` : dry ? html`<${DryLimits} live=${live} orders=${data?.orders} />` : html`<${Card} title="Order latency, as simulated" sub="Measured from this machine every few seconds, without placing orders" flush>
         <${LatencyTable} latency=${live?.latency} />
         <div class="muted" style="font-size:12px;padding:10px 14px">
           An order reaches the book half a round trip after we decide, and meets the book we see one feed delay later.
@@ -136,9 +179,11 @@ export function Paper() {
         </div>
       <//>`}
     </div>
-    <${Card} title=${dry ? "Dry-run trades" : "Paper trades"} sub=${data?.total > 300 ? "Newest 300 shown" : "Newest first; click a row for the pair"} flush>
+    <${Card} title=${`${name} trades`} sub=${data?.total > 300 ? "Newest 300 shown" : "Newest first; click a row for the pair"} flush>
       <${DataTable} rows=${trades} rowKey=${(t) => t.id} limit=${100} onRowClick=${(t) => navigate("pairs", { id: t.pair })}
-        empty=${dry
+        empty=${real
+          ? html`<${Empty} icon="play" title="No live trades yet">When a pick passes the live limits, the live trader sends its orders and the trade shows here.<//>`
+          : dry
           ? html`<${Empty} icon="play" title="No dry-run trades yet">When a pick passes the live limits, the dry run acts on it here and writes out its orders.<//>`
           : html`<${Empty} icon="play" title="No paper trades yet">When a pick appears, the paper trader acts on it here with the measured latency.<//>`}
         columns=${[

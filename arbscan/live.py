@@ -18,7 +18,8 @@ and notifies the dashboard, so neither slows the feed.
 With ``paper_trading`` on, every pick is also handed to the paper trader (paper.py),
 which simulates acting on it with this machine's measured order latency; with
 ``dry_run`` also on, to the dry-run trader too (dryrun.py), which does the same under
-the limits of a capped live run and writes out the real orders it would send.
+the limits of a capped live run and writes out the real orders it would send; and with
+``live_trading`` on, to the live trader (livetrade.py), which sends them.
 """
 
 import asyncio
@@ -37,6 +38,7 @@ from .dryrun import DryRun
 from .feeds import KalshiFeed, PMFeed
 from .http import make_client
 from .latency import LatencyModel, LatencyProbe
+from .livetrade import FEED_FRESH_S, LiveRun
 from .orders import KalshiTrading, PMTrading
 from .paper import PaperTrader
 from .results import UPSERT, kalshi_lifecycle_row, lookup
@@ -76,15 +78,33 @@ class LiveScanner(Scanner):
         self.paper = (PaperTrader(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
                                   wake=self._wake)
                       if cfg.paper_trading else None)
-        self.dry = None
-        if cfg.paper_trading and cfg.dry_run and isinstance(kfeed.signer, KalshiSigner) \
-                and isinstance(pfeed.signer, PMSigner):
-            # Account reads and order previews only: the dry run sends no order.
-            self.http = make_client()
-            self.dry = DryRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta,
-                              KalshiTrading(self.http, cfg.kalshi_base, kfeed.signer),
-                              PMTrading(self.http, cfg.pmus_trade_base, pfeed.signer), wake=self._wake)
+        self.dry = self.live = self.http = None
+        keys = isinstance(kfeed.signer, KalshiSigner) and isinstance(pfeed.signer, PMSigner)
+        if cfg.paper_trading and keys and (cfg.dry_run or cfg.live_trading):
+            self.http = make_client(trading=True)
+            kalshi = KalshiTrading(self.http, cfg.kalshi_base, kfeed.signer)
+            pm = PMTrading(self.http, cfg.pmus_trade_base, pfeed.signer)
+            if cfg.dry_run:
+                # Account reads and order previews only: the dry run sends no order.
+                self.dry = DryRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta, kalshi, pm,
+                                  wake=self._wake)
+            if cfg.live_trading:
+                # Real orders.
+                self.live = LiveRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta, kalshi,
+                                    pm, feeds_fresh=self._feeds_fresh, wake=self._wake)
+                log.warning("LIVE TRADING IS ON: picks within the live limits are traded with real orders")
         self._reset_window()
+
+    def _feeds_fresh(self, pair: Pair) -> bool:
+        """Both legs' books come over connections that are up and were heard from in the
+        last few seconds (a stalled connection keeps showing its last books)."""
+        now = time.time()
+        k = self.kfeed.stats
+        if k.connected_since is None or now - k.last_message > FEED_FRESH_S:
+            return False
+        conn = next((c for c in self.pfeed.conns if pair.pm in c.wanted), None)
+        return (conn is not None and conn.stats.connected_since is not None
+                and now - conn.stats.last_message <= FEED_FRESH_S)
 
     def _feed_lags(self, venue: str):
         if venue == "K":
@@ -245,6 +265,8 @@ class LiveScanner(Scanner):
                 ep = self.episodes.open.get(key)
                 args = (pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days, ep.start_ts if ep else ts,
                         seen if seen is not None else ts, res)
+                if self.live is not None:  # first: it's the one racing the market
+                    self.live.trader.consider(*args)
                 self.paper.consider(*args)
                 if self.dry is not None:
                     self.dry.trader.consider(*args)
@@ -326,7 +348,7 @@ class LiveScanner(Scanner):
                 await asyncio.wait_for(stop.wait(), timeout=SETTLE_EVERY_S)
             except asyncio.TimeoutError:
                 pass
-            for trader in (self.paper, self.dry and self.dry.trader):
+            for trader in (self.paper, self.dry and self.dry.trader, self.live and self.live.trader):
                 if trader is None:
                     continue
                 try:
@@ -352,6 +374,8 @@ class LiveScanner(Scanner):
             tasks.append(asyncio.create_task(self._settle_loop(stop)))
         if self.dry is not None:
             tasks.append(asyncio.create_task(self.dry.run(stop)))
+        if self.live is not None:
+            tasks.append(asyncio.create_task(self.live.run(stop)))
         try:
             await self.refresh_meta(force=True)
         except Exception as e:
@@ -388,7 +412,10 @@ class LiveScanner(Scanner):
             self.out.flush()
             log.info("saved %d open windows as cut short by the stop", n)
             await asyncio.gather(*tasks, return_exceptions=True)
-            if self.dry is not None:
+            if self.live is not None and self.live.trader.tasks:
+                # Let a trade in flight finish (sell back, write up) rather than cut it off.
+                await asyncio.wait(set(self.live.trader.tasks), timeout=30)
+            if self.http is not None:
                 await self.http.aclose()
             self.out.close()
             log.info("streaming scanner stopped")

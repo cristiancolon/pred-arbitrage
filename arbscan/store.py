@@ -285,10 +285,12 @@ WHERE rk.yes_value IS NOT NULL AND rp.yes_value IS NOT NULL;
 
 """
 
-# The dry run (dryrun.py) keeps its simulated trades in a table shaped like paper_trades.
+# The dry run (dryrun.py) keeps its simulated trades in a table shaped like paper_trades,
+# and so does the live trader (livetrade.py) its real ones.
 _PAPER = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS paper_trades"):
                 SCHEMA.index("CREATE INDEX IF NOT EXISTS paper_ts")]
 SCHEMA += _PAPER.replace("paper_trades", "dry_trades") + "CREATE INDEX IF NOT EXISTS dry_ts ON dry_trades (ts);\n"
+SCHEMA += _PAPER.replace("paper_trades", "live_trades") + "CREATE INDEX IF NOT EXISTS live_ts ON live_trades (ts);\n"
 
 
 # Views that have changed since the first release: ``connect`` replaces a stored view

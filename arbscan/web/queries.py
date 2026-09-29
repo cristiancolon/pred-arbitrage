@@ -242,8 +242,9 @@ def settled_as(t: dict) -> str | None:
 def paper(db: sqlite3.Connection, hours: float, table: str = "paper_trades") -> dict:
     """Paper trades in the last ``hours`` (newest first) and totals since the account was
     last reset. ``results`` is what settling cost or added against every settled pair
-    paying $1 (its locked-in profit). ``table`` "dry_trades": the dry run's instead."""
-    if table not in ("paper_trades", "dry_trades"):
+    paying $1 (its locked-in profit). ``table``: "dry_trades" for the dry run's,
+    "live_trades" for the live trader's."""
+    if table not in ("paper_trades", "dry_trades", "live_trades"):
         raise ValueError(table)
     since = time.time() - hours * 3600
     rows = [dict(r) for r in db.execute(f"SELECT * FROM {table} WHERE ts >= ? ORDER BY ts DESC", (since,))]
@@ -281,6 +282,19 @@ def paper(db: sqlite3.Connection, hours: float, table: str = "paper_trades") -> 
             "pnl": total,
         },
     }
+
+
+def live_orders(db: sqlite3.Connection) -> dict:
+    """The live trader's real orders: how many per venue and outcome, and the latest that
+    were rejected or whose outcome had to be read back."""
+    counts: dict[str, dict[str, int]] = {}
+    for venue, status, n in db.execute("SELECT venue, status, COUNT(*) FROM live_orders WHERE mode = 'live' "
+                                       "GROUP BY 1, 2"):
+        counts.setdefault(venue, {})[status or "sent"] = n
+    problems = [dict(r) for r in db.execute(
+        "SELECT ts, venue, market, side, action, qty, limit_price, status, error FROM live_orders "
+        "WHERE mode = 'live' AND (status IN ('rejected', 'unknown') OR error IS NOT NULL) ORDER BY ts DESC LIMIT 5")]
+    return {"orders": counts, "problems": problems}
 
 
 def dry_orders(db: sqlite3.Connection) -> dict:

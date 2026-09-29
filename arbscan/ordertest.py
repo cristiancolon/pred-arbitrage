@@ -144,7 +144,7 @@ def _venue(cfg, client, venue: str):
 
 
 async def run(cfg, db, venue: str, market: str, sides: list[str], send: bool) -> None:
-    async with make_client() as client:
+    async with make_client(trading=True) as client:
         trader, ladders = _venue(cfg, client, venue)
         held = await trader.position(market)
         if abs(held) > EPS:

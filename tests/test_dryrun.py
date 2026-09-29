@@ -176,6 +176,8 @@ def test_the_account_reads_find_positions_shard_cash_and_the_location_check(tmp_
         if request.url.host == "p.example" and path == "/v1/portfolio/positions":
             return httpx.Response(200, json={"positions": {"aec-nfl-x": {"netPositionDecimal": "-3"},
                                                            "aec-nfl-y": {"netPositionDecimal": "0"}}, "eof": True})
+        if request.url.host == "p.example" and path == "/v1/account/balances":
+            return httpx.Response(200, json={"balances": [{"currency": "USD", "buyingPower": 142.50}]})
         if path.endswith("/portfolio/positions"):
             return httpx.Response(200, json={"market_positions": [{"ticker": "KXTEST-26-A", "position_fp": "37.5"},
                                                                   {"ticker": "KXOLD-1", "position_fp": "0.00"}],
@@ -196,6 +198,7 @@ def test_the_account_reads_find_positions_shard_cash_and_the_location_check(tmp_
         return g
 
     g = asyncio.run(main())
-    assert g.held == {"KXTEST-26-A", "aec-nfl-x"}
+    assert g.held == {"KXTEST-26-A", "aec-nfl-x"} and g.positions == {"KXTEST-26-A": 37.5, "aec-nfl-x": -3}
     assert g.shard_cash == {0: pytest.approx(120.5000), 3: 0.0} and g.attested_until == 1790933187
+    assert g.pm_cash == pytest.approx(142.50)
     assert all(method == "GET" for method, _, _ in requests)  # reads only: no order endpoint is touched

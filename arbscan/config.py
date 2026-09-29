@@ -105,6 +105,15 @@ class Config:
     live_daily_loss_usd: float = 5.0
     live_series_min_settled: int = 20
     live_series_max_void: float = 0.02
+    # Live trading (livetrade.py): the dry run's picks traded with real orders, under the
+    # same live_* limits, from a separate account (``live_trades``). Off unless switched on
+    # here; it needs paper_trading and both venues' API keys. One trade at a time, at most
+    # live_max_trades_per_day a day. A leg left over is sold back no lower than
+    # live_unwind_max_loss under what it cost; if that can't be done, or an order's outcome
+    # can't be read back, trading stops until `arbscan live-resume`.
+    live_trading: bool = False
+    live_unwind_max_loss: float = 0.10
+    live_max_trades_per_day: int = 50
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

@@ -77,9 +77,12 @@ class Api:
         raise ApiError(f"{self.name} {path}: gave up after {attempts} attempts")
 
 
-def make_client() -> httpx.AsyncClient:
+def make_client(trading: bool = False) -> httpx.AsyncClient:
+    """``trading``: for order clients. Idle connections are kept a while longer, so an
+    order doesn't wait for a fresh TLS handshake."""
     return httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=10.0),
-        headers={"User-Agent": "arbscan/0.1 (read-only scanner)"},
-        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        headers={"User-Agent": "arbscan/0.1" if trading else "arbscan/0.1 (read-only scanner)"},
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16,
+                            keepalive_expiry=90.0 if trading else 5.0),
     )

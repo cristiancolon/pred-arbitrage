@@ -177,6 +177,24 @@ def test_the_dry_run_has_its_own_trades_and_order_log(env):
     assert [t["id"] for t in client.get("/api/paper?hours=1").json()["trades"]] == ["p"]
 
 
+def test_the_live_account_has_its_own_trades_and_real_orders(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    db.execute("INSERT INTO live_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_qty, p_qty, status) "
+               "VALUES ('l', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 10, 0, 0, 'missed')", (NOW - 30,))
+    for oid, mode, venue, status, error in (("a", "live", "K", "filled", None),
+                                            ("b", "live", "P", "rejected", "HTTP 400: insufficient buying power"),
+                                            ("c", "live", "P", "filled", None), ("d", "dry", "K", "filled", None)):
+        db.execute("INSERT INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, "
+                   "status, error, trade) VALUES (?, ?, ?, ?, 'm', 'yes', 'buy', 10, 0.5, '{}', ?, ?, 'l')",
+                   (oid, NOW - 30, mode, venue, status, error))
+    db.commit()
+    data = TestClient(create_app(svc)).get("/api/paper?hours=1&book=live").json()
+    assert [t["id"] for t in data["trades"]] == ["l"] and data["live"] is None  # switched off
+    assert data["orders"]["orders"] == {"K": {"filled": 1}, "P": {"rejected": 1, "filled": 1}}  # not the dry run's
+    assert [o["error"] for o in data["orders"]["problems"]] == ["HTTP 400: insufficient buying power"]
+
+
 def _trade(db, tid, ts, status, locked, pnl=None, pay=(None, None), hold=10):
     db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, planned_profit, "
                "k_qty, p_qty, k_hold, p_hold, k_out, p_out, locked_profit, status, payout_k, payout_p, pnl) "

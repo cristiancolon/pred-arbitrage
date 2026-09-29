@@ -65,9 +65,12 @@ class Guard:
         self.cfg, self.kmeta = cfg, kmeta
         self.series: set[str] | None = None
         self.held: set[str] = set()  # markets the account holds a position in, on either venue
+        self.positions: dict[str, float] = {}  # those positions: + YES, - NO contracts
         self.shard_cash: dict[int, float] | None = None
+        self.pm_cash: float | None = None  # Polymarket US buying power
         self.attested_until = 0.0  # 0: not read yet, or never attested
         self.lost_today = 0.0
+        self.epoch = 0  # bumped when a live trade starts, so a read taken during it isn't kept
 
     def __call__(self, pair, days) -> str | None:
         if self.series is None or pair.kalshi.split("-")[0] not in self.series:
@@ -97,10 +100,15 @@ class Guard:
             db.close()
 
     async def read_account(self, kalshi: KalshiTrading, pm: PMTrading) -> None:
-        held = set(await kalshi.positions()) | set(await pm.positions())
-        self.held = held
-        self.shard_cash = await kalshi.shard_cash()
-        self.attested_until = float(await kalshi.attested_until() or 0.0)
+        epoch = self.epoch
+        positions = {**await kalshi.positions(), **await pm.positions()}
+        shard_cash = await kalshi.shard_cash()
+        pm_cash = float((await pm.balance()).get("buyingPower") or 0)
+        attested = float(await kalshi.attested_until() or 0.0)
+        if self.epoch != epoch:
+            return  # a trade started meanwhile, and these may predate its fills
+        self.positions, self.held = positions, set(positions)
+        self.shard_cash, self.pm_cash, self.attested_until = shard_cash, pm_cash, attested
 
 
 class DryOrders:

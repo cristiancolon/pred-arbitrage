@@ -379,6 +379,6 @@ def test_live_trading_is_off_unless_switched_on(tmp_path):
     asyncio.run(sc.http.aclose())
 
     sc, _ = _live(tmp_path / "on", live_trading=True)
-    assert sc.live is not None and sc.live.trader.table == "live_trades" and sc.live.trader.max_stake == 10.0
+    assert sc.live is not None and sc.live.trader.table == "live_trades" and sc.live.trader.max_stake == 20.0
     assert not sc._feeds_fresh(PAIR)  # the feeds never connected
     asyncio.run(sc.http.aclose())

@@ -10,7 +10,7 @@
   <script>
     // Apply a saved theme before first paint to avoid a flash.
     try {
-      const t = JSON.parse(localStorage.getItem("arbscan:theme") || '"system"');
+      const t = JSON.parse(localStorage.getItem("arbscan:theme") || '"dark"');
       if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     } catch (e) {}
   </script>

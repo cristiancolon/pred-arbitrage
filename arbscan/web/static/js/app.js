@@ -18,7 +18,7 @@ const PAGES = {
 const ALIASES = { paper: "trading" };  // old links
 
 function ThemeToggle() {
-  const [theme, setTheme] = usePref("theme", "system");
+  const [theme, setTheme] = usePref("theme", "dark");
   useEffect(() => {
     if (theme === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);

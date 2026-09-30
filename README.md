@@ -322,8 +322,8 @@ Nothing needs a button press: new markets flow through to the scanner on their o
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without
-reloading. It works on a phone, and has light and dark themes (it follows your
-system setting by default). Every chart has a table view.
+reloading. It works on a phone, and has light and dark themes (dark by default;
+the toggle in the menu switches to light or your system setting). Every chart has a table view.
 
 The dashboard listens on all interfaces so you can open it from other devices on
 your network. Set `web_host = "127.0.0.1"` to keep it local to the Pi, or set

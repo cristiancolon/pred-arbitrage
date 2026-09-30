@@ -124,6 +124,14 @@ class _Venue:
         r.raise_for_status()
         return r.json()
 
+    async def _post(self, path: str, body: dict) -> Any:
+        r, _, _, err = await self._request("POST", path, body)
+        if err is not None:
+            raise err
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        return r.json() if r.content else {}
+
     async def _place(self, o: Order, path: str, body: dict, ok: tuple[int, ...]) -> Result:
         r, sent, ms, err = await self._request("POST", path, body)
         res = Result(o, "unknown", sent=sent, rtt_ms=ms, body=body)
@@ -202,6 +210,18 @@ class KalshiTrading(_Venue):
         """Cash per exchange shard: Kalshi only fills an order from the cash on its market's shard."""
         b = await self.balance()
         return {int(x.get("exchange_index") or 0): float(x["balance"]) for x in b.get("balance_breakdown") or []}
+
+    async def transfer(self, src: int, dst: int, dollars: float) -> dict:
+        """Move cash between two exchange shards of the account."""
+        body = {"source": "event_contract", "destination": "event_contract", "source_exchange_shard": src,
+                "destination_exchange_shard": dst, "amount": round(dollars * 10000)}  # centicents
+        return await self._post("/portfolio/intra_exchange_instance_transfer", body)
+
+    async def allocate(self, percent: dict[int, int]) -> dict:
+        """Kalshi's own target split of the account's cash across shards (whole percents)."""
+        body = {"allocations": [{"exchange_index": s, "percent": p} for s, p in sorted(percent.items())],
+                "resting_margin_reservation": "sum"}
+        return await self._post("/portfolio/target_balance_allocation", body)
 
     async def attested_until(self) -> float | None:
         """When the account's location check for API keys lapses; after that Kalshi takes

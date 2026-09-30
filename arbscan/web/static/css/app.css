@@ -504,9 +504,10 @@ a.pill:hover { text-decoration: none; border-color: var(--border-strong); }
 .shards { display: grid; gap: 10px; margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
 .shard-top { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; margin-bottom: 5px; }
 .shard-top b { font-weight: 620; }
-.bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.bar { position: relative; height: 6px; border-radius: 3px; background: var(--surface-3); }
 .bar span { display: block; height: 100%; border-radius: 3px; background: var(--kalshi); transition: width 0.4s ease; }
 .bar.p span { background: var(--poly); }
+.bar .target { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text-1); opacity: 0.55; }
 .bar.t span { background: var(--tied); }
 .cap { background: linear-gradient(160deg, var(--accent-soft), transparent 55%), var(--surface-1); }
 .cap-bar { position: relative; height: 10px; border-radius: 5px; background: var(--surface-3); margin: 8px 0 4px; overflow: hidden; }

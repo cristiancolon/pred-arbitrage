@@ -52,6 +52,7 @@ from .dryrun import SERIES_SQL, Guard, clean_series
 from .fees import order_fee
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, record, status_of
 from .paper import VENUES, PaperTrader, breakeven_price
+from .shards import Rebalancer
 from .store import open_db
 
 log = logging.getLogger(__name__)
@@ -178,6 +179,8 @@ class LiveGuard(Guard):
         self.day = date.today()
         self.trades_today = 0
         self.pnl_today = 0.0
+        self.on_short = None  # told (shard, dollars) when a pick finds too little cash on its Kalshi shard
+        self.stake_cap = lambda: 0.0
 
     def __call__(self, pair, days) -> str | None:
         if self.halted:
@@ -189,7 +192,11 @@ class LiveGuard(Guard):
             return "daily trade limit"
         if not self.feeds_fresh(pair):
             return "feed not fresh"
-        return super().__call__(pair, days)
+        why = super().__call__(pair, days)
+        if why and why.startswith("no cash on Kalshi shard") and self.on_short and self.shard_cash is not None:
+            shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
+            self.on_short(shard, self.stake_cap() - self.shard_cash.get(shard, 0.0))
+        return why
 
     def _roll(self) -> None:
         if date.today() != self.day:
@@ -256,6 +263,8 @@ class LiveTrader(PaperTrader):
         self.rejects, self.last_reject = 0, None
         self.account_stale = True  # re-read the account before long
         self.resolve_waits = RESOLVE_WAITS_S
+        self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
+        guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
         for r in db.execute(f"SELECT ts, status, settled_ts, pnl FROM {self.table} WHERE ts >= ? OR settled_ts >= ?",
                             (midnight, midnight)):
@@ -268,9 +277,16 @@ class LiveTrader(PaperTrader):
         shard of this pair's market."""
         budget = super()._budget(pair, days)
         g = self.guard
-        real = {"K": (g.shard_cash or {}).get(getattr(self.kmeta.get(pair.kalshi), "shard", 0), 0.0),
-                "P": g.pm_cash or 0.0}
-        return {v: min(budget[v], real[v] - self.reserved[v] - CASH_MARGIN) for v in VENUES}
+        shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
+        real = {"K": (g.shard_cash or {}).get(shard, 0.0), "P": g.pm_cash or 0.0}
+        out = {v: min(budget[v], real[v] - self.reserved[v] - CASH_MARGIN) for v in VENUES}
+        # Too little on the shard for a full trade's Kalshi leg: a trade sized to it came
+        # out smaller than it could have (see _execute), or none could be made at all.
+        full = min(budget["K"], self.stake_cap() or budget["K"])
+        self.shard_short = (pair.id, shard, full - out["K"], out["K"]) if out["K"] < full else None
+        if self.shard_short and out["K"] < 1.0 <= budget["P"] and g.on_short:
+            g.on_short(shard, full - out["K"])
+        return out
 
     def sync_cash(self) -> None:
         """The account's cash is what the venues hold, once their balances are known."""
@@ -284,6 +300,10 @@ class LiveTrader(PaperTrader):
 
     async def _execute(self, t: dict, ticker: str, slug: str, k_coef: float, p_coef: float, reserve: dict,
                        decide_s: float) -> None:
+        short = self.shard_short
+        if (short and short[0] == t["pair"] and reserve["K"] + k_coef / 4 + t["k_limit"] >= short[3]
+                and self.guard.on_short):
+            self.guard.on_short(short[1], short[2])  # another contract wouldn't have fit on its shard
         mk, side = {"K": ticker, "P": slug}, {"K": t["k_side"], "P": t["p_side"]}
         coef = {"K": k_coef, "P": p_coef}
         limits = {"K": t["k_limit"], "P": t["p_limit"]}
@@ -480,12 +500,15 @@ class LiveRun:
 
     def __init__(self, cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi: KalshiTrading, pm: PMTrading,
                  feeds_fresh=None, wake=None):
-        self.cfg, self.kalshi, self.pm = cfg, kalshi, pm
+        self.cfg, self.kalshi, self.pm, self.db = cfg, kalshi, pm, db
         folder = Path(cfg.db_path).parent
         self.guard = LiveGuard(cfg, kmeta, folder / HALT_FILE, feeds_fresh)
         self.journal = Journal(folder / JOURNAL_FILE)
         self.trader = LiveTrader(cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi, pm, self.guard, self.journal,
                                  wake=wake)
+        self.shards = Rebalancer(kalshi, self.guard, self.trader, kmeta) if cfg.live_shard_rebalance else None
+        if self.shards is not None:
+            self.guard.on_short = self.shards.ran_short
         self.guard.poll()
         stuck = self.journal.unresolved()
         if stuck and not self.guard.halted:
@@ -512,6 +535,12 @@ class LiveRun:
                     self.trader.sync_cash()
                 except Exception as e:
                     log.warning("live: reading the accounts failed: %s", e)
+                if self.shards is not None and not self.trader.account_stale:
+                    try:
+                        if await self.shards.step(self.db):
+                            self.trader.sync_cash()
+                    except Exception as e:
+                        log.warning("live: rebalancing Kalshi's shards failed: %s", e)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=POLL_S)
             except asyncio.TimeoutError:
@@ -526,7 +555,8 @@ class LiveRun:
                            "max_trades": cfg.live_max_trades_per_day, "max_stake": self.trader.stake_cap(),
                            "max_stake_frac": cfg.live_max_stake_frac,
                            "min_profit": cfg.live_min_profit_usd, "daily_loss": cfg.live_daily_loss_usd,
-                           "unwind_max_loss": cfg.live_unwind_max_loss}}
+                           "unwind_max_loss": cfg.live_unwind_max_loss,
+                           "shards": self.shards.snapshot() if self.shards is not None else None}}
 
 
 # --- arbscan live-check / live-halt / live-resume --------------------------------------

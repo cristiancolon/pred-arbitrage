@@ -37,7 +37,9 @@ class Exchange:
         self.asks: dict[tuple[str, str, str], list] = {}  # (venue, market, side) -> [(price, qty)]
         self.pos: dict[tuple[str, str], float] = defaultdict(float)  # + YES, - NO
         self.cash = {"K": {0: 100.0}, "P": 100.0}
-        self.script = {"K": [], "P": []}
+        self.script = {"K": [], "P": [], "transfer": []}
+        self.transfers: list[tuple[int, int, float]] = []
+        self.allocation: dict[int, int] | None = None
         self.sent: list[tuple[str, dict]] = []
         self.fail_reads = False
 
@@ -72,6 +74,19 @@ class Exchange:
     def handler(self, request: httpx.Request) -> httpx.Response:
         venue = "K" if request.url.host == "k.example" else "P"
         path = request.url.path
+        if request.method == "POST" and path.endswith("/portfolio/intra_exchange_instance_transfer"):
+            b = json.loads(request.content)
+            if self.script["transfer"]:
+                return httpx.Response(400, json={"error": self.script["transfer"].pop(0)})
+            amt = b["amount"] / 10000
+            assert self.cash["K"].get(b["source_exchange_shard"], 0.0) >= amt - 1e-9, "more than the shard holds"
+            self.cash["K"][b["source_exchange_shard"]] -= amt
+            self.cash["K"][b["destination_exchange_shard"]] = self.cash["K"].get(b["destination_exchange_shard"], 0.0) + amt
+            self.transfers.append((b["source_exchange_shard"], b["destination_exchange_shard"], amt))
+            return httpx.Response(200, json={"transfer_id": "t1", "status": "complete"})
+        if request.method == "POST" and path.endswith("/portfolio/target_balance_allocation"):
+            self.allocation = {a["exchange_index"]: a["percent"] for a in json.loads(request.content)["allocations"]}
+            return httpx.Response(200, json={})
         if request.method == "POST":
             body = json.loads(request.content)
             self.sent.append((venue, body))
@@ -398,3 +413,19 @@ def test_live_trading_runs_with_paper_trading_and_the_dry_run_off(tmp_path):
     _pm(sc, bids=[(0.50, 15)], offers=[(0.52, 50)])
     assert seen == ["K:YES+P:NO"]  # the pick still reaches the live trader
     asyncio.run(sc.http.aclose())
+
+
+def test_a_trade_sized_down_to_its_shards_cash_asks_for_more_there(tmp_path):
+    h = LiveHarness(tmp_path, paper_lead_venue="K")
+    h.market()
+    asked = []
+    h.guard.on_short = lambda shard, dollars: asked.append((shard, dollars))
+    h.guard.shard_cash = {0: 3.0, 3: 97.0}  # the pair's market is on shard 0
+    t = h.trade()
+    assert t["planned_size"] < 10 and asked and asked[0][0] == 0 and asked[0][1] > 5
+
+    h2 = LiveHarness(tmp_path / "plenty", paper_lead_venue="K")
+    h2.market()
+    h2.guard.on_short = lambda shard, dollars: asked.append((shard, dollars))
+    asked.clear()
+    assert h2.trade()["planned_size"] == 10 and asked == []  # enough there: nothing asked

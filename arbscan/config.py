@@ -114,6 +114,10 @@ class Config:
     # can't be read back, trading stops until `arbscan live-resume`.
     live_trading: bool = False
     live_unwind_max_loss: float = 0.10
+    # Move the live account's Kalshi cash between exchange shards to where its trades
+    # are (shards.py): each shard in use keeps at least a full trade's worth, the rest
+    # follows the last few days' demand, and an unused shard is emptied.
+    live_shard_rebalance: bool = True
     live_max_trades_per_day: int = 50
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0

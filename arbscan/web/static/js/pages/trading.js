@@ -75,19 +75,27 @@ function VenueCard({ name, cls, cash, tied, children }) {
   </div>`;
 }
 
-function Shards({ shards }) {
+function Shards({ shards, rb }) {
   if (!shards) return html`<div class="foot muted">Shards not read yet</div>`;
+  const want = rb?.targets || {};
   const all = Object.entries(shards).sort((x, y) => y[1] - x[1]);
-  const entries = all.filter(([, c]) => c >= 0.005);
-  const empty = all.filter(([, c]) => c < 0.005).map(([s]) => s);
-  const total = entries.reduce((s, [, c]) => s + c, 0) || 1;
+  const entries = all.filter(([s, c]) => c >= 0.005 || want[s]);
+  const empty = all.filter(([s, c]) => c < 0.005 && !want[s]).map(([s]) => s);
+  const scale = Math.max(1, ...entries.map(([s, c]) => Math.max(c, want[s] || 0)));
+  const move = rb?.moves?.[0];
   return html`<div class="shards">
     ${entries.map(([s, c]) => html`<div class="shard" key=${s}>
       <div class="shard-top"><span>Shard ${s}${SHARD_NAME[s] ? html` <span class="muted">· ${SHARD_NAME[s]}</span>` : ""}</span>
         <b class="num">${money(c)}</b></div>
-      <div class="bar"><span style=${`width:${((100 * c) / total).toFixed(1)}%`}></span></div>
+      <div class="bar" title=${want[s] != null ? `Target ${money(want[s])}` : ""}>
+        <span style=${`width:${((100 * c) / scale).toFixed(1)}%`}></span>
+        ${want[s] != null && html`<i class="target" style=${`left:${((100 * want[s]) / scale).toFixed(1)}%`}></i>`}
+      </div>
     </div>`)}
-    ${empty.length > 0 && html`<div class="foot muted">Shard${empty.length > 1 ? "s" : ""} ${empty.join(", ")} empty · an order fills only from its market's shard</div>`}
+    ${empty.length > 0 && html`<div class="foot muted">Shard${empty.length > 1 ? "s" : ""} ${empty.join(", ")}: no markets traded there</div>`}
+    ${rb ? html`<div class="foot muted">${move
+      ? `Rebalanced ${ago(move.ts)}: ${money(move.amount)} from shard ${move.from} to ${move.to}`
+      : "Rebalanced automatically; the marks are each shard's target"}</div>` : ""}
   </div>`;
 }
 
@@ -224,7 +232,7 @@ export function Trading() {
 
     <div class="grid cols-3">
       <${VenueCard} name="Kalshi" cls="k" cash=${a?.cash.K} tied=${tiedK}>
-        <${Shards} shards=${a?.limits?.shard_cash} />
+        <${Shards} shards=${a?.limits?.shard_cash} rb=${a?.limits?.shards} />
       <//>
       <${VenueCard} name="Polymarket US" cls="p" cash=${a?.cash.P} tied=${tiedP}>
         <${Holdings} cash=${a?.cash.P} tied=${tiedP} />

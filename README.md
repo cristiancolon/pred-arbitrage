@@ -231,8 +231,8 @@ Polymarket US previews them. With `--send` these are real orders: a round trip c
 the spread plus two taker fees, a few cents.
 
 Before trading live:
-- **Kalshi:** put cash on every shard you'll trade. Kalshi can keep a target split of
-  cash across shards for you (`POST /portfolio/target_balance_allocation`).
+- **Kalshi:** put the cash on any shard; the live trader moves it to the shards its
+  trades need (below).
 - **Polymarket US:** its Participant Agreement §19 requires its API conformance
   procedures and written approval before live use. Its docs put individual traders on
   the self-serve retail API (identity verification, then a key from
@@ -251,6 +251,16 @@ own:
 - Each pick is sized to the smaller of the account's cash and what the venue really
   holds: on Kalshi, the cash on the shard of the pick's market. Balances and positions
   are re-read every 30 seconds and after each trade.
+- **Kalshi's shards are kept funded** (`live_shard_rebalance`, on; `arbscan/shards.py`).
+  Between trades, cash is moved across exchange shards with Kalshi's intra-exchange
+  transfers: every shard with an active market in a cleared series keeps at least one
+  per-trade cap (or an even share, when there's less), the rest is split by the last
+  3 days' demand (what trades spent on each shard's Kalshi legs, plus what picks
+  couldn't spend for lack of cash there), and a shard with nothing to trade is
+  emptied. It acts once a shard is $3 or 15% below its target, at most every
+  5 minutes, and at once for a shard that has just cut a trade short. Kalshi's own
+  target allocation is set to the same split. The Trading page marks each shard's
+  target and the latest transfer.
 - Nothing is sent while either leg's feed connection is down or has been quiet for
   5 seconds.
 - Today's losses count the moment they happen (a leg sold back at a loss, a trade

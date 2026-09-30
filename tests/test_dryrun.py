@@ -162,7 +162,7 @@ def test_the_dry_run_starts_with_the_scanner_when_both_keys_are_set(tmp_path):
     from test_feeds import _live
     sc, _ = _live(tmp_path)
     assert sc.dry is not None and sc.dry.trader.table == "dry_trades" and sc.dry.trader.max_stake == 10.0
-    assert sc.dry.trader.cfg.bankroll_usd == 100.0 and sc.dry.trader.cfg.paper_min_profit_usd == 0.05
+    assert sc.dry.trader.cfg.bankroll_usd == 300.0 and sc.dry.trader.cfg.paper_min_profit_usd == 0.05
     asyncio.run(sc.http.aclose())
 
 

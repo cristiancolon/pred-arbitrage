@@ -194,7 +194,7 @@ def test_both_legs_fill_with_real_orders_written_down_first(tmp_path):
     # Fees are what the venues charged, and the account's cash moved by what was spent.
     assert t["k_fees"] == pytest.approx(order_fee("K", 0.07, [(0.45, 10)]), abs=1e-3)
     assert t["p_fees"] == pytest.approx(order_fee("P", 0.0695, [(0.50, 10)]))
-    assert h.trader.cash["K"] == pytest.approx(50 - t["k_out"]) and t["locked_profit"] > 0
+    assert h.trader.cash["K"] == pytest.approx(100 - t["k_out"]) and t["locked_profit"] > 0  # what Kalshi holds
     orders = h.orders()
     assert [(o["mode"], o["venue"], o["status"], o["trade"]) for o in orders] == \
         [("live", "K", "filled", t["id"]), ("live", "P", "filled", t["id"])]
@@ -312,7 +312,7 @@ def test_the_live_limits(tmp_path):
     h.kmeta["K-1"] = replace(h.kmeta["K-1"], shard=3)
     h.trade(window=4.0)
     assert h.trader.stats["no cash on Kalshi shard 3"] == 1 and not h.ex.sent
-    # Sized to the cash on the market's shard, not just the account's $50.
+    # Sized to the cash on the market's shard, not just the account's $150.
     h.kmeta["K-1"] = replace(h.kmeta["K-1"], shard=0)
     h.guard.shard_cash = {0: 3.0}
     t = h.trade(window=5.0)
@@ -326,6 +326,27 @@ def test_settling_counts_toward_todays_losses(tmp_path):
     # The legs settled against each other: both lost.
     h.trader.settle(lambda keys: {("K", "K-1"): 0.0, ("P", "p-1"): 1.0}, {PAIR.id})
     assert h.guard.lost_today == pytest.approx(t["k_out"] + t["p_out"])
+
+
+def test_the_account_holds_exactly_what_the_venues_hold(tmp_path):
+    h = LiveHarness(tmp_path, paper_lead_venue="K")
+    h.market()
+    t = h.trade()
+    # The fills moved the account's cash as they moved the venues' balances (to the
+    # cent the fill reports give; the next read of the balances makes it exact).
+    assert h.trader.cash["K"] == pytest.approx(h.ex.cash["K"][0], abs=0.01)
+    assert h.trader.cash["P"] == pytest.approx(h.ex.cash["P"], abs=0.01)
+    # Kalshi's YES won: Kalshi pays $10 for the 10 contracts. The account reads it back
+    # at once, and the next trade can spend it.
+    h.trader.account_stale = False
+    h.trader.settle(lambda keys: {("K", "K-1"): 1.0, ("P", "p-1"): 1.0}, {PAIR.id})
+    assert h.trader.account_stale
+    h.ex.cash["K"][0] += 10.0
+    h.ex.cash["K"][3] = 25.0  # cash on another shard counts too
+    asyncio.run(h.guard.read_account(h.trader.venues["K"], h.trader.venues["P"]))
+    h.trader.sync_cash()
+    assert h.trader.cash == {"K": pytest.approx(h.ex.cash["K"][0] + 25), "P": pytest.approx(h.ex.cash["P"])}
+    assert h.trader.cash["K"] == pytest.approx(100 - t["k_out"] + 10 + 25, abs=0.01)
 
 
 def test_a_restart_after_an_order_with_no_known_outcome_stays_stopped(tmp_path, capsys):

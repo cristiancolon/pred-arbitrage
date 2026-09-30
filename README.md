@@ -196,7 +196,7 @@ YES at 1 − p. An order is sent once and never retried: when the reply doesn't 
 happened, its result is `unknown` until the order or the position is read back.
 
 **The dry run** (`dry_run = true`, on by default; `arbscan/dryrun.py`) is a second paper
-trader with its own account (`dry_trades`, `live_bankroll_usd` = $100, half a venue),
+trader with its own account (`dry_trades`, `live_bankroll_usd` = $300, half a venue),
 held to the limits a first, capped live run would have:
 
 - Kalshi series with at least 20 settled pairs, none conflicting and at most 2% voided

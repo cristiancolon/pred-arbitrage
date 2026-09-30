@@ -92,7 +92,7 @@ function LiveStatus({ live, orders }) {
       : html`<div style="padding-bottom:8px"><${Badge} tone="good" icon="check">Trading<//></div>`}
     <dl class="facts">
       <dt>Per trade</dt><dd>at most ${money(lim.max_stake, 0)} for both legs, expected to make ${money(lim.min_profit)} or more; one at a time</dd>
-      <dt>Account</dt><dd>${money(live.deposits?.K, 0)} on each venue; no market the account already holds</dd>
+      <dt>Account</dt><dd>what the venues hold (Kalshi ${money(live.cash?.K)} · Polymarket US ${money(live.cash?.P)}), winnings included; no market the account already holds</dd>
       <dt title="A leg left over is sold back no lower than this under what it cost; if it can't be, trading stops">Sell-back floor</dt>
       <dd>${cents(lim.unwind_max_loss)} under cost</dd>
       <dt>Today</dt><dd>${int(lim.trades_today)} of ${int(lim.max_trades)} trades · lost ${money(lim.lost_today)} of the ${money(lim.daily_loss, 0)} limit</dd>

@@ -2,17 +2,19 @@
 
 Off unless ``live_trading = true`` (it also needs paper trading and both venues' API
 keys). The live trader is the dry-run trader (dryrun.py) with its simulated fills
-replaced by immediate-or-cancel orders on both venues (orders.py). It has its own
-account (``live_trades``; ``live_bankroll_usd``, half on each venue) and the dry run's
-limits: series with a clean settlement record, ``live_max_stake_usd`` a trade,
+replaced by immediate-or-cancel orders on both venues (orders.py). Its account
+(``live_trades``) holds exactly what the venues hold: each venue's cash is its real
+balance (Kalshi's summed over its exchange shards), re-read every ``ACCOUNT_EVERY_S``
+and right after a trade or a settlement, so whatever settled trades pay out is traded
+again. It has the dry run's limits: series with a clean settlement record, ``live_max_stake_usd`` a trade,
 ``live_min_profit_usd`` expected, the daily loss limit, no market the account already
 holds, and nothing near the Kalshi location check lapsing. On top of those:
 
 - **One trade at a time**, at most ``live_max_trades_per_day`` a day, and orders on
   one venue at least ``ORDER_GAP_S`` apart.
-- **Real cash.** A pick is sized to the smaller of the account's cash and what the
-  venue really holds: on Kalshi, the cash on the exchange shard of the pick's market.
-  Balances and positions are re-read every ``ACCOUNT_EVERY_S`` and after each trade.
+- **Real cash.** A pick is sized to the venue's real cash (on Kalshi, the cash on the
+  exchange shard of the pick's market), and to its stake cap of that venue's cash plus
+  what open trades have tied up. Nothing is traded before the balances are first read.
 - **Fresh books.** Nothing is sent while either leg's feed connection is down or has
   gone quiet for ``FEED_FRESH_S``.
 - **Today's losses** count the moment they happen (a leg sold back at a loss, a trade
@@ -262,13 +264,21 @@ class LiveTrader(PaperTrader):
                 guard.record_pnl(r["pnl"] or 0.0)
 
     def _budget(self, pair, days: float | None) -> dict[str, float]:
-        """The account's share, but no more than the venue holds: on Kalshi, the cash on
-        the shard of this pair's market."""
+        """The stake cap, but no more than the venue holds: on Kalshi, the cash on the
+        shard of this pair's market."""
         budget = super()._budget(pair, days)
         g = self.guard
         real = {"K": (g.shard_cash or {}).get(getattr(self.kmeta.get(pair.kalshi), "shard", 0), 0.0),
                 "P": g.pm_cash or 0.0}
         return {v: min(budget[v], real[v] - self.reserved[v] - CASH_MARGIN) for v in VENUES}
+
+    def sync_cash(self) -> None:
+        """The account's cash is what the venues hold, once their balances are known."""
+        g = self.guard
+        if g.shard_cash is not None:
+            self.cash["K"] = sum(g.shard_cash.values())
+        if g.pm_cash is not None:
+            self.cash["P"] = g.pm_cash
 
     # --- executing ----------------------------------------------------------------------
 
@@ -428,8 +438,7 @@ class LiveTrader(PaperTrader):
         """Write the trade up the way paper trades are, and move the account's cash."""
         hold = {v: got[v].held for v in VENUES}
         out = {v: got[v].out for v in VENUES}
-        for v in VENUES:
-            self.cash[v] -= out[v]
+        self.sync_cash()  # the fills already moved the venues' balances (_moved)
         t["books"] = json.dumps({"seen": t.pop("_seen"), "lead": lead, "orders": t.pop("_orders"),
                                  "steady": {v: round(x, 3) for v, x in steady.items()}}, separators=(",", ":"))
         t.update(k_qty=got["K"].bought, p_qty=got["P"].bought, k_fees=got["K"].fees, p_fees=got["P"].fees,
@@ -461,6 +470,8 @@ class LiveTrader(PaperTrader):
         for tid, t in before.items():
             if tid not in self.open:
                 self.guard.record_pnl(t["pnl"] or 0.0)
+        if n:
+            self.account_stale = True  # read what the venues actually paid out
         return n
 
 
@@ -498,6 +509,7 @@ class LiveRun:
                 next_account, self.trader.account_stale = now + ACCOUNT_EVERY_S, False
                 try:
                     await self.guard.read_account(self.kalshi, self.pm)
+                    self.trader.sync_cash()
                 except Exception as e:
                     log.warning("live: reading the accounts failed: %s", e)
             try:
@@ -530,7 +542,7 @@ async def check(cfg) -> None:
 
     halt_path, journal_path = _paths(cfg)
     print(f"live trading: {'ON' if cfg.live_trading else 'off'} (live_trading in config.toml)")
-    print(f"limits: ${cfg.live_bankroll_usd / 2:g} a venue, ${cfg.live_max_stake_usd:g} a trade, "
+    print(f"limits: the venues' real balances, ${cfg.live_max_stake_usd:g} a trade, "
           f"${cfg.live_min_profit_usd:g} expected profit, ${cfg.live_daily_loss_usd:g} daily loss, "
           f"{cfg.live_max_trades_per_day} trades a day, sell-back floor {100 * cfg.live_unwind_max_loss:g}c under cost")
     guard = LiveGuard(cfg, {}, halt_path)

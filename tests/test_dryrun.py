@@ -61,7 +61,24 @@ class DryHarness(Harness):
         from arbscan.paper import PaperTrader
         return PaperTrader(cfg, self.db, self.db, self.lat, self.kbooks, self.pbooks, self.kmeta,
                            wake=lambda pair, delay: self.woken.append((pair, delay)), name="dry",
-                           guard=self.guard, max_stake=self.cfg.live_max_stake_usd, orders=self.orders)
+                           guard=self.guard, max_stake=self.cfg.live_max_stake_frac, orders=self.orders)
+
+
+def test_the_stake_grows_with_the_account(tmp_path):
+    h = DryHarness(tmp_path)
+    assert h.trader.stake_cap() == pytest.approx(10.0)  # 1/30 of the $300 account
+    for v in ("K", "P"):
+        h.trader.cash[v] += 150.0  # the account doubled
+    h.kbooks["K-1"] = kbook({0.55: 100})
+    h.pbooks["p-1"] = pbook([(0.50, 100)])
+
+    async def run():
+        h.offer()
+        await asyncio.gather(*h.trader.tasks)
+
+    asyncio.run(run())
+    t = dict(h.db.execute("SELECT * FROM dry_trades").fetchone())
+    assert t["planned_size"] == 20 and t["planned_cost"] <= 20.0
 
 
 def test_the_dry_run_trades_within_its_stake_and_writes_the_orders_it_would_send(tmp_path):
@@ -161,7 +178,7 @@ def test_the_records_come_from_settled_pairs_and_todays_trades(tmp_path):
 def test_the_dry_run_starts_with_the_scanner_when_both_keys_are_set(tmp_path):
     from test_feeds import _live
     sc, _ = _live(tmp_path)
-    assert sc.dry is not None and sc.dry.trader.table == "dry_trades" and sc.dry.trader.max_stake == 20.0
+    assert sc.dry is not None and sc.dry.trader.table == "dry_trades" and sc.dry.trader.max_stake == 0.10
     assert sc.dry.trader.cfg.bankroll_usd == 300.0 and sc.dry.trader.cfg.paper_min_profit_usd == 0.05
     asyncio.run(sc.http.aclose())
 

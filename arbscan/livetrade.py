@@ -6,7 +6,7 @@ replaced by immediate-or-cancel orders on both venues (orders.py). Its account
 (``live_trades``) holds exactly what the venues hold: each venue's cash is its real
 balance (Kalshi's summed over its exchange shards), re-read every ``ACCOUNT_EVERY_S``
 and right after a trade or a settlement, so whatever settled trades pay out is traded
-again. It has the dry run's limits: series with a clean settlement record, ``live_max_stake_usd`` a trade,
+again. It has the dry run's limits: series with a clean settlement record, ``live_max_stake_frac`` of the account a trade,
 ``live_min_profit_usd`` expected, the daily loss limit, no market the account already
 holds, and nothing near the Kalshi location check lapsing. On top of those:
 
@@ -248,7 +248,7 @@ class LiveTrader(PaperTrader):
                  guard: LiveGuard, journal: Journal, wake=None):
         live_cfg = replace(cfg, bankroll_usd=cfg.live_bankroll_usd, paper_min_profit_usd=cfg.live_min_profit_usd)
         super().__init__(live_cfg, db, out, latency, kbooks, pbooks, kmeta, wake=wake, name="live", guard=guard,
-                         max_stake=cfg.live_max_stake_usd)
+                         max_stake=cfg.live_max_stake_frac)
         self.venues = {"K": kalshi, "P": pm}
         self.journal = journal
         guard.busy = self.busy
@@ -523,7 +523,8 @@ class LiveRun:
                 "limits": {"series": None if g.series is None else len(g.series), "held": len(g.held),
                            "shard_cash": g.shard_cash, "pm_cash": g.pm_cash, "attested_until": g.attested_until or None,
                            "lost_today": g.lost_today, "trades_today": g.trades_today,
-                           "max_trades": cfg.live_max_trades_per_day, "max_stake": cfg.live_max_stake_usd,
+                           "max_trades": cfg.live_max_trades_per_day, "max_stake": self.trader.stake_cap(),
+                           "max_stake_frac": cfg.live_max_stake_frac,
                            "min_profit": cfg.live_min_profit_usd, "daily_loss": cfg.live_daily_loss_usd,
                            "unwind_max_loss": cfg.live_unwind_max_loss}}
 
@@ -542,7 +543,7 @@ async def check(cfg) -> None:
 
     halt_path, journal_path = _paths(cfg)
     print(f"live trading: {'ON' if cfg.live_trading else 'off'} (live_trading in config.toml)")
-    print(f"limits: the venues' real balances, ${cfg.live_max_stake_usd:g} a trade, "
+    print(f"limits: the venues' real balances, {100 * cfg.live_max_stake_frac:g}% of them a trade, "
           f"${cfg.live_min_profit_usd:g} expected profit, ${cfg.live_daily_loss_usd:g} daily loss, "
           f"{cfg.live_max_trades_per_day} trades a day, sell-back floor {100 * cfg.live_unwind_max_loss:g}c under cost")
     guard = LiveGuard(cfg, {}, halt_path)

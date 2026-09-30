@@ -202,7 +202,8 @@ held to the limits a first, capped live run would have:
 - Kalshi series with at least 20 settled pairs, none conflicting and at most 2% voided
   (`live_series_min_settled`, `live_series_max_void`). A mismatched pair looks like an
   arb, so it gets picked far more often than it occurs.
-- At most $20 a trade for both legs (`live_max_stake_usd`), expected to make 5¢ or more
+- At most 10% of the account's money a trade for both legs (`live_max_stake_frac`; cash plus
+  open trades on both venues, so it grows with the account), expected to make 5¢ or more
   (`live_min_profit_usd`), and no new trade once today's trades have lost $10, net of
   today's gains, across both venues together (`live_daily_loss_usd`).
 - No market the account already holds a position in (it may be one taken by hand).

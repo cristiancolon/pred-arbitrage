@@ -76,7 +76,7 @@ class Harness:
         cfg.setdefault("paper_lead_venue", "")  # both legs at once unless a test says otherwise
         cfg.setdefault("pick_min_window_s", 0.0)  # trade at first sight unless a test says otherwise
         cfg.setdefault("paper_quiet_s", 0.0)
-        cfg.setdefault("live_max_stake_usd", 10.0)  # the live tests' trades are sized to $10
+        cfg.setdefault("live_max_stake_frac", 1 / 30)  # the live tests' trades: $10 of a $300 account
         self.cfg = Config(db_path=str(tmp_path / "p.db"), bankroll_usd=cfg.pop("bankroll", 300), **cfg)
         self.db = connect(self.cfg.db_path)
         self.lat = LatencyModel(lambda v: [0.02] if v == "K" else [0.05], random.Random(1))

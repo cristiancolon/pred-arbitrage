@@ -95,12 +95,13 @@ class Config:
     # (live_orders), and Polymarket US checks each buy with its order preview. Nothing
     # is sent. A pick must come from a series with at least live_series_min_settled
     # settled pairs, none conflicting and at most live_series_max_void voided; one
-    # trade costs at most live_max_stake_usd and must be expected to make
+    # trade costs at most live_max_stake_frac of the account's money (cash plus open
+    # trades, both venues together, so it grows with the account) and must make
     # live_min_profit_usd; no new trade once today's trades have lost
     # live_daily_loss_usd, net of today's gains, across both venues together.
     dry_run: bool = True
     live_bankroll_usd: float = 300.0
-    live_max_stake_usd: float = 20.0
+    live_max_stake_frac: float = 0.10
     live_min_profit_usd: float = 0.05
     live_daily_loss_usd: float = 10.0
     live_series_min_settled: int = 20

@@ -10,8 +10,9 @@ limits a first live run would have:
   ``live_series_max_void`` of them voided. A mismatched pair looks like an arb, so it
   gets picked far more often than it occurs; this keeps to pairings that have
   already settled as one bet many times.
-- **Stakes.** At most ``live_max_stake_usd`` a trade, both legs together, and only
-  picks expected to make ``live_min_profit_usd``.
+- **Stakes.** At most ``live_max_stake_frac`` of the account's money a trade (cash
+  plus open trades, both venues together), both legs together, and only picks
+  expected to make ``live_min_profit_usd``.
 - **A daily loss limit.** No new trade once trades settled today have lost
   ``live_daily_loss_usd``.
 - **The account.** No market the account already holds a position in (it may be one
@@ -156,7 +157,7 @@ class DryRun:
         self.orders = DryOrders(out, pm)
         dry_cfg = replace(cfg, bankroll_usd=cfg.live_bankroll_usd, paper_min_profit_usd=cfg.live_min_profit_usd)
         self.trader = PaperTrader(dry_cfg, db, out, latency, kbooks, pbooks, kmeta, wake=wake, name="dry",
-                                  guard=self.guard, max_stake=cfg.live_max_stake_usd, orders=self.orders)
+                                  guard=self.guard, max_stake=cfg.live_max_stake_frac, orders=self.orders)
 
     async def run(self, stop: asyncio.Event) -> None:
         """Keep the limits' inputs current and the previews flowing."""
@@ -189,5 +190,6 @@ class DryRun:
         return {**self.trader.snapshot(), "previews": dict(self.orders.previews),
                 "limits": {"series": None if g.series is None else len(g.series), "held": len(g.held),
                            "shard_cash": g.shard_cash, "attested_until": g.attested_until or None,
-                           "lost_today": g.lost_today, "max_stake": self.cfg.live_max_stake_usd,
+                           "lost_today": g.lost_today, "max_stake": self.trader.stake_cap(),
+                           "max_stake_frac": self.cfg.live_max_stake_frac,
                            "min_profit": self.cfg.live_min_profit_usd, "daily_loss": self.cfg.live_daily_loss_usd}}

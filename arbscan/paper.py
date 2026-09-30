@@ -177,7 +177,9 @@ class PaperTrader:
         self.cfg = cfg
         self.name, self.table = name, f"{name}_trades"
         self.guard = guard  # guard(pair, days): why this trader won't take a pick, or None
-        self.max_stake = max_stake  # the most one trade may cost, both legs together
+        # The most one trade may cost, both legs together, as a fraction of the account's
+        # money (stake_cap).
+        self.max_stake = max_stake
         self.orders = orders  # orders.leg(trade id, Order, fill): the order each simulated leg stands for
         self.out = out  # DbWriter (or a connection in tests)
         self.latency = latency
@@ -233,6 +235,13 @@ class PaperTrader:
 
     def available(self, venue: str) -> float:
         return self.cash[venue] - self.reserved[venue]
+
+    def stake_cap(self) -> float | None:
+        """The most one trade may cost now: its share of the account's money, cash plus
+        what open trades cost, on both venues together."""
+        if self.max_stake is None:
+            return None
+        return self.max_stake * sum(self.cash[v] + self.tied[v] for v in VENUES)
 
     # --- liquidity our own fills took -------------------------------------------------
 
@@ -328,9 +337,10 @@ class PaperTrader:
         kv = self._visible(kl, self._hidden("K", pair.kalshi, k_side))
         pv = self._visible(pl, self._hidden("P", pair.pm, p_side))
         res = walk(Leg(kv, k_coef), Leg(pv, p_coef), self.cfg.min_edge, budget_a=budget["K"], budget_b=budget["P"])
-        if self.max_stake is not None and res.positive and res.cost > self.max_stake:
+        cap = self.stake_cap()
+        if cap is not None and res.positive and res.cost > cap:
             res = walk(Leg(kv, k_coef), Leg(pv, p_coef), self.cfg.min_edge,
-                       max_size=math.floor(res.size * self.max_stake / res.cost), budget_a=budget["K"],
+                       max_size=math.floor(res.size * cap / res.cost), budget_a=budget["K"],
                        budget_b=budget["P"])
         rate = bankroll.annualized(res.profit, res.cost, days)
         if (not res.positive or res.profit < self.cfg.paper_min_profit_usd

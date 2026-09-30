@@ -52,7 +52,7 @@ function DryLimits({ live, orders }) {
   const refused = orders?.refused?.[0];
   return html`<${Card} title="Live limits" sub="What a first, capped live run would be held to. Nothing is sent">
     <dl class="facts">
-      <dt>Per trade</dt><dd>at most ${money(lim.max_stake, 0)} for both legs, expected to make ${money(lim.min_profit)} or more</dd>
+      <dt>Per trade</dt><dd>at most ${stakeText(lim)} for both legs, expected to make ${money(lim.min_profit)} or more</dd>
       <dt>Account</dt><dd>${money(live.deposits?.K, 0)} on each venue; no market the account already holds</dd>
       <dt title="Since the last restart">Picks the limits skipped</dt>
       <dd>${skipped.length ? skipped.map(([k, n]) => `${k}: ${int(n)}`).join(" · ") : "none yet"}</dd>
@@ -68,6 +68,10 @@ function DryLimits({ live, orders }) {
     </dl>
     ${refused ? html`<div class="muted" style="font-size:12px;padding-top:8px">Latest refusal: ${refused.market}: ${refused.preview}</div>` : null}
   <//>`;
+}
+
+function stakeText(lim) {
+  return `${Math.round(100 * (lim.max_stake_frac || 0))}% of the account (now ${money(lim.max_stake)})`;
 }
 
 function shardText(cash) {
@@ -91,7 +95,7 @@ function LiveStatus({ live, orders }) {
           <code>arbscan live-resume</code> on the machine it runs on.<//>`
       : html`<div style="padding-bottom:8px"><${Badge} tone="good" icon="check">Trading<//></div>`}
     <dl class="facts">
-      <dt>Per trade</dt><dd>at most ${money(lim.max_stake, 0)} for both legs, expected to make ${money(lim.min_profit)} or more; one at a time</dd>
+      <dt>Per trade</dt><dd>at most ${stakeText(lim)} for both legs, expected to make ${money(lim.min_profit)} or more; one at a time</dd>
       <dt>Account</dt><dd>what the venues hold (Kalshi ${money(live.cash?.K)} · Polymarket US ${money(live.cash?.P)}), winnings included; no market the account already holds</dd>
       <dt title="A leg left over is sold back no lower than this under what it cost; if it can't be, trading stops">Sell-back floor</dt>
       <dd>${cents(lim.unwind_max_loss)} under cost</dd>

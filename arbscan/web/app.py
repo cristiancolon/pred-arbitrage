@@ -165,6 +165,7 @@ class Service:
             "features": {"jev": bool(jev.api_key(self.cfg))},
             "bankroll": self.cfg.bankroll_usd,
             "paper": self._paper_brief(),
+            "live": self._live_brief(),
         }
 
     def _paper_brief(self) -> dict | None:
@@ -173,6 +174,16 @@ class Service:
             return None
         return {"realized": p.realized, "locked": sum(t["locked_profit"] for t in p.open.values()),
                 "open": len(p.open), "cash": dict(p.cash), "sent": p.stats.get("sent", 0)}
+
+    def _live_brief(self) -> dict | None:
+        """The live trader's state, for the status shown on every page."""
+        lr = getattr(self.scanner, "live", None)
+        if lr is None:
+            return None
+        t = lr.trader
+        return {"halted": lr.guard.halted, "in_flight": len(t.busy), "open": len(t.open),
+                "pnl": t.realized + sum(x["locked_profit"] for x in t.open.values()),
+                "bankroll": sum(t.cash[v] + t.tied[v] for v in t.cash)}
 
     def on_sweep(self) -> None:
         if self.hub.subscribers:
@@ -305,6 +316,17 @@ def create_app(svc: Service) -> Starlette:
         data["rules"] = svc.rules.describe()
         return JSON(data)
 
+    async def live(request: Request) -> Response:
+        """Everything the Trading page shows: the live account, its limits, trades and orders."""
+        data = await svc.read(queries.paper, _float(request, "hours", 24, 0.25, 24 * 90), "live_trades")
+        data.update(await svc.read(queries.live_stats))
+        data["orders"] = await svc.read(queries.live_orders)
+        trader = getattr(svc.scanner, "live", None)
+        data["enabled"] = svc.cfg.live_trading
+        data["account"] = trader.snapshot() if trader is not None else None
+        data["rules"] = svc.rules.describe()
+        return JSON(data)
+
     async def jobs(_: Request) -> Response:
         return JSON({"job": svc.job.snapshot(), "log": list(svc.job.log)})
 
@@ -328,6 +350,7 @@ def create_app(svc: Service) -> Starlette:
             Route("/api/pairs/remove", remove, methods=["POST"]),
             Route("/api/opportunities", opportunities),
             Route("/api/paper", paper),
+            Route("/api/live", live),
             Route("/api/jobs", jobs),
             Route("/api/jobs/refresh", refresh, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC)),

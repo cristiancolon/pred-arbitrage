@@ -108,7 +108,7 @@ class Config:
     live_series_max_void: float = 0.02
     # Live trading (livetrade.py): the dry run's picks traded with real orders, under the
     # same live_* limits, from a separate account (``live_trades``). Off unless switched on
-    # here; it needs paper_trading and both venues' API keys. One trade at a time, at most
+    # here; it needs both venues' API keys, not paper_trading or dry_run. One trade at a time, at most
     # live_max_trades_per_day a day. A leg left over is sold back no lower than
     # live_unwind_max_loss under what it cost; if that can't be done, or an order's outcome
     # can't be read back, trading stops until `arbscan live-resume`.

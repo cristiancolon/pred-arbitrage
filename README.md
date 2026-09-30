@@ -123,7 +123,7 @@ too little data to tune on; revisit them as history builds up.
 ### Paper trading
 
 With both venues' API keys set, the streaming scanner also **paper trades** every pick
-(`paper_trading = true`; the Paper trading page). It never places an order; it acts
+(`paper_trading = true`). It never places an order; it acts
 the way a bot on this machine would, and fills against the live books:
 
 1. **Wait** until the window has been open `pick_min_window_s` (1 s) and both legs'
@@ -217,8 +217,9 @@ held to the limits a first, capped live run would have:
 Every leg it simulates is also written to `live_orders` (mode `dry`) as the exact
 request the order clients would post, and Polymarket US checks each buy with its
 order preview, which validates price, size, market state and buying power without
-placing anything. Nothing is sent. The Paper trading page switches between the paper
-account and the dry run.
+placing anything. Nothing is sent. Paper trading and the dry run are independent of the
+live trader: either or both can be switched off (`paper_trading = false`,
+`dry_run = false`) while it trades.
 
 **`arbscan order-test --venue K|P --market ID [--side yes|no|both] [--send]`** is the
 end-to-end check of real order placement. It buys one contract at the best ask and
@@ -295,7 +296,16 @@ The stop outlasts restarts. The commands:
 (catalog, match and Jev review, every hour), and a web dashboard at `http://<pi>:8787/`.
 Nothing needs a button press: new markets flow through to the scanner on their own.
 
-- **Overview.** The five pipeline stages with live status. A chart of how close the
+- **Trading** (the home page). The live account at a glance: the total bankroll (cash
+  plus open trades at cost) and how it splits between Kalshi, Polymarket US and open
+  trades; each venue's cash, with Kalshi's broken down by exchange shard; the current
+  per-trade cap (`live_max_stake_frac` of the bankroll, so it grows with it); live P&L
+  (settled, locked in on open trades, and today's); the share of each pick that filled,
+  overall and per venue; the round trip of the latest real orders; a P&L chart; the
+  guardrails (today's loss against the daily limit, trades today, the Kalshi location
+  check); orders sent and rejected, and why picks were passed over; and every trade.
+  The header on every page shows whether live trading is on and the bankroll and P&L.
+- **Scanner.** The five pipeline stages with live status. A chart of how close the
   best watched pair got to breakeven over time. Open opportunities and a
   closest-to-breakeven leaderboard, both updated after every sweep. Picks' profit by
   hour, and what one $300 bankroll could have made from them. Once both of a pick's
@@ -309,13 +319,6 @@ Nothing needs a button press: new markets flow through to the scanner on their o
 - **Opportunities.** Picks by default (or every profitable window): how long it
   lasted, how big the edge got, the capital it needed, its return per year, and why
   a window wasn't a pick.
-- **Paper trading.** The simulated account: P&L, cash on each venue, how much of
-  each pick actually filled, the latency used, and every paper trade. Settled trades
-  count what their markets really paid, and the page shows how much that moved the
-  P&L from $1 a pair, with voided and mismatched trades flagged. Switch to the dry run
-  to see what a capped live run would have done, the orders it wrote out, and
-  Polymarket US's verdict on them; switch to Live for the live trader's real trades,
-  whether it's trading or stopped (and why), and its orders.
 - **Refresh job.** Run the refresh on demand and watch its log stream live.
 
 Updates are pushed over server-sent events, so the page stays current without

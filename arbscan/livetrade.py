@@ -1,7 +1,7 @@
 """Live trading: the dry run's picks, traded with real orders.
 
-Off unless ``live_trading = true`` (it also needs paper trading and both venues' API
-keys). The live trader is the dry-run trader (dryrun.py) with its simulated fills
+Off unless ``live_trading = true`` (it also needs both venues' API keys; paper trading
+and the dry run may be off). The live trader is the dry-run trader (dryrun.py) with its simulated fills
 replaced by immediate-or-cancel orders on both venues (orders.py). Its account
 (``live_trades``) holds exactly what the venues hold: each venue's cash is its real
 balance (Kalshi's summed over its exchange shards), re-read every ``ACCOUNT_EVERY_S``

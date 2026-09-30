@@ -195,6 +195,29 @@ def test_the_live_account_has_its_own_trades_and_real_orders(env):
     assert [o["error"] for o in data["orders"]["problems"]] == ["HTTP 400: insufficient buying power"]
 
 
+
+def test_the_trading_page_gets_the_live_account_in_one_call(env):
+    cfg, svc = env
+    db = svc.scanner.db
+    db.execute("INSERT INTO live_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_qty, p_qty, "
+               "locked_profit, status, settled_ts, pnl) VALUES ('s', ?, 'K-1|p-1', 'K:YES+P:NO', 'yes', 'no', 10, 10, 10, "
+               "0.3, 'settled', ?, 0.25)", (NOW - 60, NOW - 30))
+    for oid, venue, qty, filled, rtt in (("a", "K", 10, 10, 80), ("b", "K", 10, 10, 120), ("c", "P", 10, 4, 200),
+                                         ("d", "P", 10, 0, 300)):
+        db.execute("INSERT INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, "
+                   "status, filled, rtt_ms) VALUES (?, ?, 'live', ?, 'm', 'yes', 'buy', ?, 0.5, '{}', 'filled', ?, ?)",
+                   (oid, NOW - 60, venue, qty, filled, rtt))
+    db.execute("INSERT INTO live_orders (id, ts, mode, venue, market, side, action, qty, limit_price, body, filled, "
+               "rtt_ms) VALUES ('x', ?, 'dry', 'K', 'm', 'yes', 'buy', 10, 0.5, '{}', 0, 999)", (NOW - 60,))
+    db.commit()
+    data = TestClient(create_app(svc)).get("/api/live?hours=1").json()
+    assert [t["id"] for t in data["trades"]] == ["s"] and data["account"] is None and data["enabled"] is False
+    assert data["today"] == {"pnl": pytest.approx(0.25), "trades": 1}
+    assert data["order_latency"]["K"] == {"p50_ms": 80, "p90_ms": 80, "samples": 2}  # the dry run's isn't counted
+    assert data["order_fills"]["P"] == {"rate": pytest.approx(0.2), "orders": 2, "filled": 1}
+    assert data["order_fills"]["K"]["rate"] == 1.0
+    assert svc.state()["live"] is None
+
 def _trade(db, tid, ts, status, locked, pnl=None, pay=(None, None), hold=10):
     db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, planned_profit, "
                "k_qty, p_qty, k_hold, p_hold, k_out, p_out, locked_profit, status, payout_k, payout_p, pnl) "

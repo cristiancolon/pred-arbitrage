@@ -5,6 +5,7 @@ import sqlite3
 import statistics
 import time
 from collections import Counter
+from datetime import datetime
 
 from .. import bankroll
 
@@ -308,3 +309,27 @@ def dry_orders(db: sqlite3.Connection) -> dict:
         "SELECT ts, market, side, limit_price, qty, preview FROM live_orders "
         "WHERE mode = 'dry' AND preview IS NOT NULL AND preview != 'ok' ORDER BY ts DESC LIMIT 5")]
     return {"orders": counts, "previews": dict(previews), "refused": refused}
+
+
+def _pct(values: list[float], q: float) -> float | None:
+    values = sorted(values)
+    return values[int(q * (len(values) - 1))] if values else None
+
+
+def live_stats(db: sqlite3.Connection, recent: int = 50) -> dict:
+    """The live account at a glance: what today's trades made, how fast the latest real
+    orders came back, and how much of what each venue was asked to buy it filled."""
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    today = db.execute(
+        "SELECT COALESCE(SUM(CASE WHEN settled_ts >= ? THEN pnl END), 0), "
+        "SUM(ts >= ? AND status != 'missed') FROM live_trades", (midnight, midnight)).fetchone()
+    latency, fills = {}, {}
+    for v in ("K", "P"):
+        rtts = [r[0] for r in db.execute("SELECT rtt_ms FROM live_orders WHERE mode = 'live' AND venue = ? "
+                                         "AND rtt_ms IS NOT NULL ORDER BY ts DESC LIMIT ?", (v, recent))]
+        latency[v] = {"p50_ms": _pct(rtts, 0.5), "p90_ms": _pct(rtts, 0.9), "samples": len(rtts)}
+        asked, got, n, hit = db.execute(
+            "SELECT COALESCE(SUM(qty), 0), COALESCE(SUM(filled), 0), COUNT(*), SUM(COALESCE(filled, 0) > 0) "
+            "FROM live_orders WHERE mode = 'live' AND venue = ? AND action = 'buy'", (v,)).fetchone()
+        fills[v] = {"rate": got / asked if asked else None, "orders": n, "filled": hit or 0}
+    return {"today": {"pnl": today[0], "trades": today[1] or 0}, "order_latency": latency, "order_fills": fills}

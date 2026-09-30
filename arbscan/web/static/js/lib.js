@@ -95,8 +95,8 @@ export function useDebounced(value, ms = 250) {
 
 // ---------- routing ----------
 export function parseRoute() {
-  const [page, query = ""] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
-  return { page: page || "overview", params: Object.fromEntries(new URLSearchParams(query)) };
+  const [page, query = ""] = (location.hash.replace(/^#\/?/, "") || "trading").split("?");
+  return { page: page || "trading", params: Object.fromEntries(new URLSearchParams(query)) };
 }
 export function useRoute() {
   const [route, setRoute] = useState(parseRoute);

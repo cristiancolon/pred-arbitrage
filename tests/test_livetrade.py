@@ -382,3 +382,19 @@ def test_live_trading_is_off_unless_switched_on(tmp_path):
     assert sc.live is not None and sc.live.trader.table == "live_trades" and sc.live.trader.max_stake == 0.10
     assert not sc._feeds_fresh(PAIR)  # the feeds never connected
     asyncio.run(sc.http.aclose())
+
+
+def test_live_trading_runs_with_paper_trading_and_the_dry_run_off(tmp_path):
+    from arbscan.feeds import KalshiBook
+    from test_feeds import _live, _pm
+
+    sc, _ = _live(tmp_path, live_trading=True, paper_trading=False, dry_run=False)
+    assert sc.paper is None and sc.dry is None and sc.traders == [sc.live.trader]
+    seen = []
+    sc.live.trader.consider = lambda *args: seen.append(args[1])
+    kb = sc.kfeed.books.setdefault("K-1", KalshiBook())
+    kb.snapshot({"yes_dollars_fp": [["0.3500", "100"]], "no_dollars_fp": [["0.4000", "20"]]}, time.time())
+    sc._on_kalshi("K-1")
+    _pm(sc, bids=[(0.50, 15)], offers=[(0.52, 50)])
+    assert seen == ["K:YES+P:NO"]  # the pick still reaches the live trader
+    asyncio.run(sc.http.aclose())

@@ -15,11 +15,12 @@ happen, and Polymarket US reports its trading state in every book message.
 Once a second the scanner commits to SQLite, writes a summary row to ``sweeps``,
 and notifies the dashboard, so neither slows the feed.
 
-With ``paper_trading`` on, every pick is also handed to the paper trader (paper.py),
-which simulates acting on it with this machine's measured order latency; with
-``dry_run`` also on, to the dry-run trader too (dryrun.py), which does the same under
-the limits of a capped live run and writes out the real orders it would send; and with
-``live_trading`` on, to the live trader (livetrade.py), which sends them.
+Every pick is handed to whichever traders are switched on, each independent of the
+others: with ``paper_trading``, the paper trader (paper.py), which simulates acting on it
+with this machine's measured order latency; with ``dry_run``, the dry-run trader
+(dryrun.py), which does the same under the limits of a capped live run and writes out the
+real orders it would send; with ``live_trading``, the live trader (livetrade.py), which
+sends them. The latter two need both venues' API keys.
 """
 
 import asyncio
@@ -80,7 +81,7 @@ class LiveScanner(Scanner):
                       if cfg.paper_trading else None)
         self.dry = self.live = self.http = None
         keys = isinstance(kfeed.signer, KalshiSigner) and isinstance(pfeed.signer, PMSigner)
-        if cfg.paper_trading and keys and (cfg.dry_run or cfg.live_trading):
+        if keys and (cfg.dry_run or cfg.live_trading):
             self.http = make_client(trading=True)
             kalshi = KalshiTrading(self.http, cfg.kalshi_base, kfeed.signer)
             pm = PMTrading(self.http, cfg.pmus_trade_base, pfeed.signer)
@@ -93,6 +94,8 @@ class LiveScanner(Scanner):
                 self.live = LiveRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta, kalshi,
                                     pm, feeds_fresh=self._feeds_fresh, wake=self._wake)
                 log.warning("LIVE TRADING IS ON: picks within the live limits are traded with real orders")
+        self.traders = [t for t in (self.paper, self.dry and self.dry.trader, self.live and self.live.trader)
+                        if t is not None]
         self._reset_window()
 
     def _feeds_fresh(self, pair: Pair) -> bool:
@@ -261,13 +264,14 @@ class LiveScanner(Scanner):
                      days, json.dumps(top_n(kl, n)), json.dumps(top_n(pl, n))),
                 )
             self.episodes.observe(key, ts, res, days)
-            if self.paper is not None and res.positive:
+            if self.traders and res.positive:
                 ep = self.episodes.open.get(key)
                 args = (pair, label, k_side, p_side, kl, pl, km.fee_coef, p_coef, days, ep.start_ts if ep else ts,
                         seen if seen is not None else ts, res)
                 if self.live is not None:  # first: it's the one racing the market
                     self.live.trader.consider(*args)
-                self.paper.consider(*args)
+                if self.paper is not None:
+                    self.paper.consider(*args)
                 if self.dry is not None:
                     self.dry.trader.consider(*args)
 
@@ -348,9 +352,7 @@ class LiveScanner(Scanner):
                 await asyncio.wait_for(stop.wait(), timeout=SETTLE_EVERY_S)
             except asyncio.TimeoutError:
                 pass
-            for trader in (self.paper, self.dry and self.dry.trader, self.live and self.live.trader):
-                if trader is None:
-                    continue
+            for trader in self.traders:
                 try:
                     trader.settle(lambda keys: lookup(self.db, keys), self.finished)
                 except Exception as e:
@@ -365,7 +367,7 @@ class LiveScanner(Scanner):
         self.pairs.refresh()
         self._reindex()
         tasks = [asyncio.create_task(self.kfeed.run(stop)), asyncio.create_task(self.pfeed.run(stop))]
-        if self.paper is not None:
+        if self.traders:
             # Orders go to the same host as the authenticated feed (api.polymarket.us).
             pm_api = "https://" + urlparse(self.cfg.pmus_ws_url).netloc
             probe = LatencyProbe(self.latency, self.cfg.kalshi_base, self.kfeed.signer, pm_api, self.pfeed.signer,

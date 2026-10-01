@@ -247,7 +247,7 @@ trades the dry run's picks with real orders, from its own account (`live_trades`
 same `live_bankroll_usd`, half a venue) and under the same limits, plus a few of its
 own:
 
-- One trade at a time, at most `live_max_trades_per_day` (50) a day.
+- One trade at a time, at most `live_max_trades_per_day` (200) a day: a brake on a runaway trader, not a limit on a normal day.
 - Each pick is sized to the smaller of the account's cash and what the venue really
   holds: on Kalshi, the cash on the shard of the pick's market. Balances and positions
   are re-read every 30 seconds and after each trade.

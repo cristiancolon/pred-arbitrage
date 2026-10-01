@@ -118,7 +118,7 @@ class Config:
     # are (shards.py): each shard in use keeps at least a full trade's worth, the rest
     # follows the last few days' demand, and an unused shard is emptied.
     live_shard_rebalance: bool = True
-    live_max_trades_per_day: int = 50
+    live_max_trades_per_day: int = 200
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

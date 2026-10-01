@@ -105,8 +105,9 @@ class Exchange:
             how = self.script[venue].pop(0) if self.script[venue] else "fill"
             if how == "reject":
                 return httpx.Response(400, json={"error": {"code": "insufficient_balance"}})
-            if how == "paused":
-                return httpx.Response(409, json={"error": {"code": "trading_is_paused", "message": "trading is paused"}})
+            if how in ("paused", "exchange_is_paused"):
+                code = "trading_is_paused" if how == "paused" else how
+                return httpx.Response(409, json={"error": {"code": code, "message": "paused"}})
             if how == "500":
                 return httpx.Response(500, text="oops")
             reply = self._kalshi_order(body) if venue == "K" else self._pm_order(body)
@@ -895,11 +896,12 @@ def test_nothing_is_traded_while_kalshi_is_closed_or_about_to_close(tmp_path):
         assert h.guard.kalshi_closed("K-1")
 
 
-def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp_path):
+@pytest.mark.parametrize("reply", ["paused", "exchange_is_paused"])
+def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp_path, reply):
     h = LiveHarness(tmp_path)
     h.market()
     h.ex.book("P", "p-1", "yes", [(0.52, 100)])  # Polymarket's NO is bid 48c
-    h.ex.script["K"] = ["paused"]
+    h.ex.script["K"] = [reply]
     t = h.trade()
     # Polymarket filled, Kalshi said trading is paused: no second try there, Polymarket sold back.
     assert [(v, b.get("intent", "K")) for v, b in h.ex.sent] == [

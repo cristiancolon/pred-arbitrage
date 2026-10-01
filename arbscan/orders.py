@@ -101,11 +101,15 @@ def _ts(v) -> float | None:
         return None
 
 
+PAUSED_CODES = frozenset({"trading_is_paused", "exchange_is_paused", "exchange_is_closed", "trading_is_closed"})
+
+
 def paused(reply: Any) -> bool:
     """Kalshi's reply to an order sent while trading is paused (its weekly maintenance,
-    Thursdays 03:00-05:00 ET, or a halt): HTTP 409, ``trading_is_paused``."""
+    Thursdays 03:00-05:00 ET, or a halt): HTTP 409, ``trading_is_paused`` or
+    ``exchange_is_paused`` (both seen on 2026-10-01), or the exchange closed."""
     err = reply.get("error") if isinstance(reply, dict) else None
-    return isinstance(err, dict) and err.get("code") == "trading_is_paused"
+    return isinstance(err, dict) and err.get("code") in PAUSED_CODES
 
 
 class _Venue:

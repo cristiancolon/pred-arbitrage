@@ -429,3 +429,22 @@ def test_a_trade_sized_down_to_its_shards_cash_asks_for_more_there(tmp_path):
     h2.guard.on_short = lambda shard, dollars: asked.append((shard, dollars))
     asked.clear()
     assert h2.trade()["planned_size"] == 10 and asked == []  # enough there: nothing asked
+
+
+def test_a_leftover_leg_sold_back_counts_toward_todays_losses_at_once(tmp_path):
+    h = LiveHarness(tmp_path, paper_lead_venue="K")
+    h.market()
+    h.ex.book("P", "p-1", "no", [(0.50, 4)])  # Polymarket fills 4 of the 10 Kalshi bought
+    t = h.trade()
+    assert (t["status"], t["k_hold"], t["p_hold"], t["unwind_qty"]) == ("open", 4, 4, 6)
+    assert t["unwind_loss"] > 0 and h.guard.lost_today == pytest.approx(t["unwind_loss"])  # not at settlement
+    # A restart counts it again from the record.
+    assert h.new_trader().guard.lost_today == pytest.approx(t["unwind_loss"])
+    # Settling as one bet counts the rest of the trade, so the day ends at the trade's P&L.
+    h2 = LiveHarness(tmp_path / "settle", paper_lead_venue="K")
+    h2.market()
+    h2.ex.book("P", "p-1", "no", [(0.50, 4)])
+    t2 = h2.trade()
+    h2.trader.settle(lambda keys: {("K", "K-1"): 1.0, ("P", "p-1"): 1.0}, {PAIR.id})  # one bet: YES won
+    pnl = h2.trades()[-1]["pnl"]
+    assert h2.guard.pnl_today == pytest.approx(pnl) and pnl == pytest.approx(t2["locked_profit"])

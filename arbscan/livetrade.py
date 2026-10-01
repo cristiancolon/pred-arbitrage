@@ -164,6 +164,13 @@ class Journal:
         return [r for i, r in sends.items() if i not in known]
 
 
+def early_loss(t) -> float:
+    """What selling back a leftover leg lost on a trade that stayed open, counted
+    toward the day's losses when it happened. Its settlement counts the rest of the
+    trade's P&L. A trade unwound completely settles at once, its P&L the whole loss."""
+    return 0.0 if t.get("note") == "unwound" else max(0.0, t.get("unwind_loss") or 0.0)
+
+
 class LiveGuard(Guard):
     """The dry run's limits plus the live trader's own; see the module docstring."""
 
@@ -266,11 +273,14 @@ class LiveTrader(PaperTrader):
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
-        for r in db.execute(f"SELECT ts, status, settled_ts, pnl FROM {self.table} WHERE ts >= ? OR settled_ts >= ?",
-                            (midnight, midnight)):
+        for r in db.execute(f"SELECT ts, status, settled_ts, pnl, unwind_loss, note FROM {self.table} "
+                            "WHERE ts >= ? OR settled_ts >= ?", (midnight, midnight)):
+            r = dict(r)
             guard.trades_today += r["ts"] >= midnight
+            if r["ts"] >= midnight:
+                guard.record_pnl(-early_loss(r))
             if r["status"] == "settled" and (r["settled_ts"] or 0) >= midnight:
-                guard.record_pnl(r["pnl"] or 0.0)
+                guard.record_pnl((r["pnl"] or 0.0) + early_loss(r))
 
     def _budget(self, pair, days: float | None) -> dict[str, float]:
         """The stake cap, but no more than the venue holds: on Kalshi, the cash on the
@@ -472,6 +482,7 @@ class LiveTrader(PaperTrader):
             self.guard.record_pnl(t["pnl"])
         else:
             t["status"] = "open"
+            self.guard.record_pnl(-early_loss(t))  # a leftover leg sold back: lost now, not at settlement
             notes = [f"{abs(hold['K'] - hold['P']):g} contracts unhedged"] if abs(hold["K"] - hold["P"]) >= 1 else []
             t["note"] = "; ".join(notes + ([f"stopped: {stopped}"] if stopped else [])) or None
             self.open[t["id"]] = t
@@ -489,7 +500,7 @@ class LiveTrader(PaperTrader):
         n = super().settle(lookup, finished)
         for tid, t in before.items():
             if tid not in self.open:
-                self.guard.record_pnl(t["pnl"] or 0.0)
+                self.guard.record_pnl((t["pnl"] or 0.0) + early_loss(t))  # what wasn't counted already
         if n:
             self.account_stale = True  # read what the venues actually paid out
         return n

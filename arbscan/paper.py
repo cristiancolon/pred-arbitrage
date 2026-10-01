@@ -144,6 +144,7 @@ class Watch:
     seen: deque = field(default_factory=deque)  # (ts, Kalshi ladder, Polymarket ladder)
     woken: float = 0.0  # when the re-check already scheduled fires
     refused: str | None = None  # the guard's latest passing refusal, counted once per window
+    poor: bool = False  # sized once already and not worth trading (it may yet become so)
 
     def add(self, ts: float, kl, pl, keep: float) -> None:
         self.seen.append((ts, kl[:WATCH_LEVELS], pl[:WATCH_LEVELS]))
@@ -306,15 +307,17 @@ class PaperTrader:
         if seen is not None and self.rules.reason(seen.top_edge, math.inf, days,
                                                   bankroll.annualized(seen.profit, seen.cost, days)):
             return
-        if now < w.due:
+        if now < w.due and not (w.refused == "confirming the book" and self._confirmed(pair, ask=False)):
+            self._ahead(pair, days, w, w.due - now, seen)
             self._wake(pair, w, now)
             return
         # Both legs' prices must have held still a while: a quote that just moved tends
         # to keep moving, and the second leg arrives a few hundred ms after the first.
         steady = {"K": self._steady("K", pair.kalshi, k_side, now), "P": self._steady("P", pair.pm, p_side, now)}
-        hold = self.cfg.paper_quiet_s - min(steady.values())
+        hold = self._hold(steady)
         if hold > 0:
-            w.due = now + hold
+            w.refused, w.due = None, now + hold
+            self._ahead(pair, days, w, hold, seen)
             self._wake(pair, w, now)
             return
         why = self.guard(pair, days) if self.guard is not None else None
@@ -346,7 +349,15 @@ class PaperTrader:
         if (not res.positive or res.profit < self.cfg.paper_min_profit_usd
                 or self.rules.reason(res.top_edge, now - w.since, days, rate)):
             # Not worth it on what stayed put; look again shortly, as a level that came and went ages out.
-            w.due = now + RECHECK_S
+            w.poor, w.refused, w.due = True, None, now + RECHECK_S
+            self._wake(pair, w, now)
+            return
+        if not self._confirmed(pair):
+            # Asked for, now that the trade is otherwise decided; the pair is priced
+            # again the moment the answer is in.
+            if w.refused != "confirming the book":
+                self.stats["confirming the book"] += 1
+            w.refused, w.due = "confirming the book", now + RECHECK_S
             self._wake(pair, w, now)
             return
         n = res.size
@@ -376,6 +387,18 @@ class PaperTrader:
         longer it locks the money up."""
         cap = self.rules.stake_fraction(days)
         return {v: min(self.available(v), cap * (self.cash[v] + self.tied[v])) for v in VENUES}
+
+    def _hold(self, steady: dict[str, float]) -> float:
+        """How much longer the legs' prices must hold still before a trade."""
+        return self.cfg.paper_quiet_s - min(steady.values())
+
+    def _ahead(self, pair, days: float | None, w: Watch, eta: float, seen=None) -> None:
+        """A pick on ``pair`` may come due in ``eta`` seconds (the live trader gets ready)."""
+
+    def _confirmed(self, pair, ask: bool = True) -> bool:
+        """The books a trade is about to be sized on are known to be current (``ask``:
+        if not, have them checked)."""
+        return True
 
     def _wake(self, pair, w: Watch, now: float) -> None:
         """Have the scanner price the pair again when the window is next due, in case

@@ -119,6 +119,14 @@ class Config:
     # follows the last few days' demand, and an unused shard is emptied.
     live_shard_rebalance: bool = True
     live_max_trades_per_day: int = 200
+    # How a live trade's two orders go out. The first leg's miss costs nothing, so it is
+    # the leg likelier to miss: Polymarket US ("P"), whose books are thin, slower to
+    # reach, and streamed without sequence numbers ("K": Kalshi first; "auto": the leg
+    # whose price moved last, as in paper trading). The older of the two legs' prices
+    # must have held still live_settle_s: when both have just moved, the market is
+    # still repricing and one of them is usually gone before the second order lands.
+    live_lead_venue: str = "P"
+    live_settle_s: float = 3.0
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.
     pmus_taker_rebate: float = 0.0
     book_levels_stored: int = 10

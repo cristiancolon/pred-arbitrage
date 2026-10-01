@@ -92,7 +92,7 @@ class LiveScanner(Scanner):
             if cfg.live_trading:
                 # Real orders.
                 self.live = LiveRun(cfg, db, self.out, self.latency, kfeed.books, pfeed.books, self.kmeta, kalshi,
-                                    pm, feeds_fresh=self._feeds_fresh, wake=self._wake)
+                                    pm, feeds_fresh=self._feeds_fresh, wake=self._wake, reprice=self._reprice_pm)
                 log.warning("LIVE TRADING IS ON: picks within the live limits are traded with real orders")
         self.traders = [t for t in (self.paper, self.dry and self.dry.trader, self.live and self.live.trader)
                         if t is not None]
@@ -188,6 +188,12 @@ class LiveScanner(Scanner):
         for p in self.by_slug.get(slug, ()):
             self._evaluate(p, seen)
         self._lag(book)
+
+    def _reprice_pm(self, slug: str) -> None:
+        """A Polymarket US book was checked against the exchange (and corrected if it
+        had fallen behind): price its pairs on what it holds now."""
+        for p in list(self.by_slug.get(slug, ())):
+            self._evaluate(p)
 
     def _wake(self, pair: Pair, delay: float) -> None:
         asyncio.get_running_loop().call_later(delay, self._recheck, pair)

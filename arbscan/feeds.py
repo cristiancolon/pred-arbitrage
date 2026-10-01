@@ -112,6 +112,18 @@ class PMBook:
         self.top_ts = [0.0, 0.0]  # when the best YES / NO ask last moved to its current price
 
     def update(self, md: dict, recv: float) -> None:
+        at = None
+        t = md.get("transactTime")
+        if t:
+            try:
+                at = datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        if self.ready and at is not None and self.exch_ts is not None and at < self.exch_ts - 1e-4:
+            # Older than the book we hold (confirm.BookCheck put a newer one in from the
+            # exchange while this was on its way): the stream is alive, the book stays.
+            self.recv_ts = recv
+            return
         old = (self.yes_asks[0][0] if self.yes_asks else None, self.no_asks[0][0] if self.no_asks else None)
         self.yes_asks, self.no_asks = pmus_ladders(md)
         new = (self.yes_asks[0][0] if self.yes_asks else None, self.no_asks[0][0] if self.no_asks else None)
@@ -120,13 +132,9 @@ class PMBook:
                 self.top_ts[i] = recv
         self.state = md.get("state") or self.state
         self.stamped = False
-        t = md.get("transactTime")
-        if t:
-            try:
-                self.exch_ts = datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
-                self.stamped = self.ready  # the first message after subscribing is a snapshot
-            except ValueError:
-                pass
+        if at is not None:
+            self.exch_ts = at
+            self.stamped = self.ready  # the first message after subscribing is a snapshot
         self.ready, self.recv_ts = True, recv
 
     @property

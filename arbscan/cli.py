@@ -59,6 +59,10 @@ def main(argv: list[str] | None = None) -> None:
     lr = sub.add_parser("live-resume", help="let live trading go on after a stop")
     lr.add_argument("--checked", action="store_true",
                     help="orders with no known outcome have been checked on the venues by hand")
+    bt = sub.add_parser("backtest", help="replay the recorded trade decisions: how often both legs fill, by the "
+                                         "way the orders are sent")
+    bt.add_argument("--draws", type=int, default=100, help="order timings tried per decision")
+    bt.add_argument("--seed", type=int, default=7)
     rp = sub.add_parser("report", help="summarize what the scanner found")
     rp.add_argument("--hours", type=float, default=24.0)
     rp.add_argument("--min-profit", type=float, default=0.0, help="ignore windows below this $ profit")
@@ -121,6 +125,10 @@ def main(argv: list[str] | None = None) -> None:
                 livetrade.halt(cfg, args.reason)
             elif not livetrade.resume(cfg, args.checked):
                 sys.exit(1)
+        elif args.cmd == "backtest":
+            from . import backtest
+
+            backtest.run(db, args.draws, args.seed)
         elif args.cmd == "report":
             report.run(db, args.hours, args.min_profit, args.top, cfg.bankroll_usd,
                        bankroll.PickRules.from_config(cfg))

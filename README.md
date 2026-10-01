@@ -266,13 +266,56 @@ own:
 - Today's losses count the moment they happen (a leg sold back at a loss, a trade
   settling).
 
-A trade sends one leg first (the one whose price moved most recently), then the other
-for what that filled. If the second leg comes up short, it buys the rest at up to
-break-even; whatever is still unhedged is sold back, no lower than
-`live_unwind_max_loss` (10¢) under what it cost. An order is never sent twice: one
+A trade sends the Polymarket US leg first (`live_lead_venue = "P"`), then Kalshi's for
+what that filled, at up to break-even against what the first leg really cost (the
+order fills at the book's prices, so the higher limit only matters when the planned
+price has gone). Whatever is still unhedged is got out of the cheaper way, by the books
+as they stand: the missing contracts are bought past break-even, or the extra ones sold
+back, either way losing no more than `live_unwind_max_loss` (10¢) a contract. An order
+is never sent twice: one
 whose reply is lost (a timeout, a 5xx) is read back from the venue's position. Every
 order is written to `data/live_journal.jsonl` before it goes out and again once its
 outcome is known, and kept in `live_orders` (mode `live`).
+
+**Filling both legs.** In its first two days the live trader sold a leg back on 6 of
+45 trades (5 completely), always the same way: the first leg filled and the second
+found nothing at the price the scanner had seen. The orders and recorded quotes show
+three causes, and what the trader now does about each:
+
+- *A frozen Polymarket US book* (3 trades). Its stream has no sequence numbers, and on
+  2026-09-29 it went silent for single markets for up to five minutes, with the
+  connection up and other markets flowing, while the real books moved on. Kalshi's
+  price moved past the dead quote, Kalshi's leg was bought against it, and Polymarket
+  had nothing there. Now the Polymarket US book is read straight from the exchange a
+  moment before a pick comes due (`arbscan/confirm.py`: REST with a cache-busting
+  query, ~130 ms, asked for 0.4 s ahead so it costs the trade no time) and nothing is
+  sent on a book that hasn't just been read. A book that had frozen is repaired by the
+  read, and the pick priced on it is gone.
+- *A thin Polymarket US offer taken or pulled first* (2 trades): a few contracts at the
+  limit, gone in the ~200 ms the order took to follow Kalshi's. Now Polymarket US goes
+  first. If its order finds nothing, nothing was spent (and that market is left alone
+  for a minute); if it fills part, Kalshi's leg is sized to that part.
+- *Both prices had just moved* (1 trade): each had held still the 2 s of
+  `paper_quiet_s`, but the market was still repricing and Kalshi's quote was gone
+  280 ms later. Now the older of the two prices must have held still `live_settle_s`
+  (3 s) as well.
+
+`arbscan backtest` replays every recorded decision (live, dry run and paper) against
+the books the scanner went on to record, under the old way of sending orders and the
+new one, drawing order timings from the live orders' own. Given the live trades' real
+timings it reproduces all of their real outcomes. On the 210 decisions recorded
+2026-09-26 to 09-30, both legs filled on 94.3% of trades the old way and 97.3% the new
+way (between 94.9% and 99.2%, allowing for having seen only 210); on the 46 live trades
+alone, 88.1% and 97.6%; contracts bought per contract ordered (the Trading page's
+Filled figure) went from 95.1% to 99.2%. Trades that sell a leg back fall from about
+1 in 22 to 1 in 86. What's left is a first leg that finds nothing (free, about 1 in
+65) and a Kalshi quote that goes in the quarter second after Polymarket US fills.
+Waiting longer than 2 s and 3 s fills no more of what's left, and trades less. The
+replay is on the cautious side for the new way (its second leg may pay a cent less
+than the live trader's, and it never finishes a pair past break-even) and flattering
+for the old (it can't see a frozen book at a paper or dry-run decision, where no real
+order tested it). If the book check ever fails to catch a frozen book, the Polymarket
+US order finds nothing and no money moves (95.9% in the replay).
 
 **It stops itself** by writing `data/live.halt`, with the reason, when:
 - a position is left unhedged;

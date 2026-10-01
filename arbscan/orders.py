@@ -310,6 +310,11 @@ class PMTrading(_Venue):
             self._tally(res.order, res, order, 0.0, 0.0, 0.0)
         return res
 
+    async def book(self, slug: str) -> dict:
+        """The market's book (``marketData``) straight from the exchange. The route is
+        cached for 30 s at the edge; a unique query string gets past that."""
+        return (await self._get(f"/v1/markets/{slug}/book", {"_": str(time.time_ns())})).get("marketData") or {}
+
     async def balance(self) -> dict:
         j = await self._get("/v1/account/balances")
         return next((b for b in j.get("balances") or [] if b.get("currency", "USD") == "USD"), {})

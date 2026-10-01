@@ -20,12 +20,27 @@ holds, and nothing near the Kalshi location check lapsing. On top of those:
 - **Today's losses** count the moment they happen (a leg sold back at a loss, a trade
   settling), not every few minutes.
 
-A trade sends one leg first (the one whose price moved most recently, as in paper
-trading) at the planned limit, then the other for what that filled. If the second leg
-comes up short, it buys the rest at up to break-even; anything still unhedged is sold
-back, at no less than ``live_unwind_max_loss`` under what it cost. An order is never
-sent twice: one whose reply doesn't say what happened (a timeout, a 5xx) is read back
-from the venue's position.
+A trade sends the Polymarket US leg first (``live_lead_venue``) at the planned limit:
+its books are thin and its stream can't be checked for gaps, so it is the leg that
+misses, and a first leg that misses costs nothing. Kalshi's leg follows for what that
+filled, at up to break-even against what it really cost (the order fills at the book's
+prices, so the higher limit only matters if the planned price has gone). Anything still
+unhedged is got out of the cheaper way, by the books as they stand: the missing
+contracts bought past break-even, or the extra ones sold back; either way at a loss of
+no more than ``live_unwind_max_loss`` a contract. An
+order is never sent twice: one whose reply doesn't say what happened (a timeout, a 5xx)
+is read back from the venue's position.
+
+Before any order, three things a pick must pass that paper trading doesn't ask for
+(``arbscan backtest`` replays the recorded trades with and without them):
+
+- **The Polymarket US book is checked against the exchange** (confirm.BookCheck) a
+  moment before the pick comes due. A streamed book that had frozen is repaired by the
+  check, and the pick priced on it is gone.
+- **Both prices have settled**: the older of the two legs' prices has held still
+  ``live_settle_s``, as well as the newer one ``paper_quiet_s``.
+- **No miss on that market just now**: a first leg that found nothing keeps the market
+  out for ``COOL_S``.
 
 Every order is written to a journal file (``live_journal.jsonl`` next to the
 database) before it's sent and again once its outcome is known, and kept in
@@ -48,10 +63,11 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
+from . import confirm
 from .dryrun import SERIES_SQL, Guard, clean_series
-from .fees import order_fee
+from .fees import order_fee, per_contract
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, record, status_of
-from .paper import VENUES, PaperTrader, breakeven_price
+from .paper import VENUES, PaperTrader, _opposite, breakeven_price, limit_for
 from .shards import Rebalancer
 from .store import open_db
 
@@ -66,8 +82,10 @@ FEED_FRESH_S = 5.0
 ORDER_GAP_S = 0.1
 RESOLVE_WAITS_S = (1.5, 3.0)  # read an unclear order's position this long after it, then again
 MAX_REJECTS = 3  # stop after this many rejected orders in a row
+COOL_S = 60.0  # a market whose first leg found nothing is left alone this long
 CASH_MARGIN = 0.10  # leave this much of a venue's real cash unspent (fees round up)
 TICK = 0.01  # orders the trader prices itself go on whole cents, a valid price on every market
+DUST = 0.005  # contracts: less than this held is nothing held
 NAMES = {"K": "Kalshi", "P": "Polymarket US"}
 
 
@@ -165,16 +183,20 @@ class Journal:
 
 
 def early_loss(t) -> float:
-    """What selling back a leftover leg lost on a trade that stayed open, counted
+    """What a trade that stayed open has lost for certain, counted
     toward the day's losses when it happened. Its settlement counts the rest of the
     trade's P&L. A trade unwound completely settles at once, its P&L the whole loss."""
-    return 0.0 if t.get("note") == "unwound" else max(0.0, t.get("unwind_loss") or 0.0)
+    if t.get("note") == "unwound":
+        return 0.0
+    # Sold back at a loss, or the pair finished past break-even (its locked profit is
+    # then below zero, and already includes anything a sale lost).
+    return max(0.0, t.get("unwind_loss") or 0.0, -(t.get("locked_profit") or 0.0))
 
 
 class LiveGuard(Guard):
     """The dry run's limits plus the live trader's own; see the module docstring."""
 
-    transient = frozenset({"a trade in flight", "feed not fresh"})  # look again shortly
+    transient = frozenset({"a trade in flight", "feed not fresh", "an order there just missed"})  # look again shortly
 
     def __init__(self, cfg, kmeta: dict, halt_path, feeds_fresh=None):
         super().__init__(cfg, kmeta)
@@ -188,6 +210,7 @@ class LiveGuard(Guard):
         self.pnl_today = 0.0
         self.on_short = None  # told (shard, dollars) when a pick finds too little cash on its Kalshi shard
         self.stake_cap = lambda: 0.0
+        self.cooling: dict[str, float] = {}  # market -> when a pick on it may be taken again
 
     def __call__(self, pair, days) -> str | None:
         if self.halted:
@@ -199,11 +222,28 @@ class LiveGuard(Guard):
             return "daily trade limit"
         if not self.feeds_fresh(pair):
             return "feed not fresh"
+        if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
+            return "an order there just missed"
         why = super().__call__(pair, days)
         if why and why.startswith("no cash on Kalshi shard") and self.on_short and self.shard_cash is not None:
             shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
             self.on_short(shard, self.stake_cap() - self.shard_cash.get(shard, 0.0))
         return why
+
+    def passing(self, pair, days) -> str | None:
+        """The refusals that outlast a moment (``__call__`` without the passing ones, and
+        without telling anyone a shard ran short): is this pair worth getting ready for?"""
+        if self.halted:
+            return "halted"
+        if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
+            return "an order there just missed"
+        return Guard.__call__(self, pair, days)
+
+    def cool(self, market: str) -> None:
+        """Leave ``market`` alone for a while: an order there found nothing of what its book showed."""
+        now = time.time()
+        self.cooling = {m: t for m, t in self.cooling.items() if t > now}
+        self.cooling[market] = now + COOL_S
 
     def _roll(self) -> None:
         if date.today() != self.day:
@@ -259,12 +299,13 @@ class LiveTrader(PaperTrader):
     """Trades the dry run's picks with real orders; see the module docstring."""
 
     def __init__(self, cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi: KalshiTrading, pm: PMTrading,
-                 guard: LiveGuard, journal: Journal, wake=None):
+                 guard: LiveGuard, journal: Journal, wake=None, check: "confirm.BookCheck | None" = None):
         live_cfg = replace(cfg, bankroll_usd=cfg.live_bankroll_usd, paper_min_profit_usd=cfg.live_min_profit_usd)
         super().__init__(live_cfg, db, out, latency, kbooks, pbooks, kmeta, wake=wake, name="live", guard=guard,
                          max_stake=cfg.live_max_stake_frac)
         self.venues = {"K": kalshi, "P": pm}
         self.journal = journal
+        self.check = check  # the Polymarket US book, checked against the exchange before a trade
         guard.busy = self.busy
         self.last_order = {v: 0.0 for v in VENUES}
         self.rejects, self.last_reject = 0, None
@@ -273,7 +314,7 @@ class LiveTrader(PaperTrader):
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
-        for r in db.execute(f"SELECT ts, status, settled_ts, pnl, unwind_loss, note FROM {self.table} "
+        for r in db.execute(f"SELECT ts, status, settled_ts, pnl, unwind_loss, locked_profit, note FROM {self.table} "
                             "WHERE ts >= ? OR settled_ts >= ?", (midnight, midnight)):
             r = dict(r)
             guard.trades_today += r["ts"] >= midnight
@@ -298,6 +339,42 @@ class LiveTrader(PaperTrader):
             g.on_short(shard, full - out["K"])
         return out
 
+    def _hold(self, steady: dict[str, float]) -> float:
+        """Paper trading's quiet time for the leg that moved last, and ``live_settle_s``
+        for the other: with both just moved, the market is still repricing."""
+        return max(super()._hold(steady), self.cfg.live_settle_s - max(steady.values()))
+
+    def _ahead(self, pair, days: float | None, w, eta: float, seen=None) -> None:
+        """Have the Polymarket US book checked just before a pick comes due, so the
+        check costs the trade no time. Only for a window that could still be traded:
+        one that stays open without being worth a trade isn't read over and over."""
+        if (self.check is None or self.busy or w.poor or self.guard.passing(pair, days) is not None
+                or (seen is not None and seen.profit < self.cfg.paper_min_profit_usd)):
+            return
+        self.check.ask_in(pair.pm, eta - confirm.LEAD_S)
+
+    def _confirmed(self, pair, ask: bool = True) -> bool:
+        if self.check is None or self.check.ok(pair.pm):
+            return True
+        if ask:
+            self.check.ask(pair.pm)
+        return False
+
+    def _cash(self, venue: str, market: str) -> float:
+        """The venue's real cash an order in ``market`` can draw on."""
+        g = self.guard
+        if venue == "P":
+            return g.pm_cash or 0.0
+        return (g.shard_cash or {}).get(getattr(self.kmeta.get(market), "shard", 0), 0.0)
+
+    def _cap(self, venue: str, market: str, coef: float, qty: float, limit: float, other: Fills) -> float:
+        """The most the second leg may pay: break-even against what the first really
+        cost, never under its planned limit, and no more than the venue's cash covers."""
+        cap = max(limit, tick_down(breakeven_price(coef, 1.0 - other.out / other.held)))
+        while cap > limit + EPS and qty * (cap + coef / 4) > self._cash(venue, market) - CASH_MARGIN:
+            cap = max(limit, cap - TICK)
+        return cap
+
     def sync_cash(self) -> None:
         """The account's cash is what the venues hold, once their balances are known."""
         g = self.guard
@@ -318,11 +395,12 @@ class LiveTrader(PaperTrader):
         coef = {"K": k_coef, "P": p_coef}
         limits = {"K": t["k_limit"], "P": t["p_limit"]}
         steady = t.pop("_steady")
-        lead = self.cfg.paper_lead_venue
+        lead = self.cfg.live_lead_venue
         if lead not in VENUES:  # never both at once: the second leg is sized to what the first got
             lead = "K" if steady["K"] < steady["P"] else "P"
         follow = "P" if lead == "K" else "K"
         got = {v: Fills() for v in VENUES}
+        tried: dict[str, float] = {}  # venue -> the most a buy there has already offered
         t.update(unwind_venue=None, unwind_qty=0.0, unwind_loss=0.0, k_delay_ms=None, p_delay_ms=None, _orders=[])
         self.guard.epoch += 1
         self.guard._roll()
@@ -330,12 +408,21 @@ class LiveTrader(PaperTrader):
         stopped = None
         try:
             try:
-                await self._send(t, Order(lead, mk[lead], side[lead], "buy", t["planned_size"], limits[lead]),
-                                 coef[lead], got)
+                first = await self._send(t, Order(lead, mk[lead], side[lead], "buy", t["planned_size"],
+                                                  limits[lead]), coef[lead], got)
                 if got[lead].held >= 1:
-                    await self._send(t, Order(follow, mk[follow], side[follow], "buy", got[lead].held,
-                                              limits[follow]), coef[follow], got)
-                await self._even_up(t, mk, side, coef, got)
+                    # The other leg for what the first filled, at up to break-even: it
+                    # fills at the book's prices, so the cap only matters if the planned
+                    # price has gone, and then it saves selling the first leg back.
+                    n = math.floor(got[lead].held + EPS)
+                    cap = self._cap(follow, mk[follow], coef[follow], n, limits[follow], got[lead])
+                    second = await self._send(t, Order(follow, mk[follow], side[follow], "buy", n, cap),
+                                              coef[follow], got)
+                    if self._met_book(second):
+                        tried[follow] = cap
+                elif first.status == "none":
+                    self._missed(mk[lead], lead)
+                await self._even_up(t, mk, side, coef, got, tried)
             except Halt as e:
                 stopped = str(e)
             except Exception as e:
@@ -357,6 +444,19 @@ class LiveTrader(PaperTrader):
             self.account_stale = True
             if self.rejects >= MAX_REJECTS and not self.guard.halted:
                 self.guard.halt(f"the last {self.rejects} orders were rejected (latest: {self.last_reject})")
+
+    @staticmethod
+    def _met_book(res: Result) -> bool:
+        """The order reached the book and took what was there at its limit: one that was
+        rejected, or whose outcome had to be read from the position, may never have."""
+        return res.status in ("filled", "partial", "none") and not res.error
+
+    def _missed(self, market: str, venue: str) -> None:
+        """The first leg found nothing of what its book showed: that book isn't to be
+        trusted for a while (and the next pick on it is checked afresh)."""
+        self.guard.cool(market)
+        if venue == "P" and self.check is not None:
+            self.check.forget(market)
 
     async def _send(self, t: dict, o: Order, coef: float, got: dict[str, Fills]) -> Result:
         """Send one order, learn what it did, and write it down before and after."""
@@ -437,9 +537,11 @@ class LiveTrader(PaperTrader):
         elif o.venue == "P" and g.pm_cash is not None:
             g.pm_cash += delta
 
-    async def _even_up(self, t: dict, mk: dict, side: dict, coef: dict, got: dict[str, Fills]) -> None:
-        """An unequal fill: buy the missing leg up to break-even, then sell back what's
-        still unhedged, but not below the floor. Stops trading if some is left over."""
+    async def _even_up(self, t: dict, mk: dict, side: dict, coef: dict, got: dict[str, Fills],
+                       tried: dict[str, float] | None = None) -> None:
+        """An unequal fill: buy the missing leg up to break-even (unless the order just
+        sent there already offered that much), then sell back what's still unhedged,
+        but not below the floor. Stops trading if some is left over."""
         gap = got["K"].held - got["P"].held
         if abs(gap) < 1:
             return
@@ -447,12 +549,24 @@ class LiveTrader(PaperTrader):
         x = math.floor(abs(gap) + EPS)
         unit_long = got[long_v].out / got[long_v].held  # each unhedged contract's cost, fees included
         cap = tick_down(breakeven_price(coef[short_v], 1.0 - unit_long))
-        if cap >= TICK:
-            await self._send(t, Order(short_v, mk[short_v], side[short_v], "buy", x, cap), coef[short_v], got)
+        tried = {} if tried is None else tried
+        if cap >= TICK and cap > tried.get(short_v, 0.0) + EPS:
+            res = await self._send(t, Order(short_v, mk[short_v], side[short_v], "buy", x, cap), coef[short_v], got)
+            if self._met_book(res):
+                tried[short_v] = cap
             x = math.floor(got[long_v].held - got[short_v].held + EPS)
         if x < 1:
             return
         floor = tick_up(max(TICK, got[long_v].cost / got[long_v].bought - self.cfg.live_unwind_max_loss))
+        # Out the cheaper way. Finishing the pair past break-even loses a known few cents;
+        # selling back loses the spread and a second fee, and a thin book may have no bid.
+        price = self._finish_at(short_v, mk[short_v], side[short_v], coef[short_v], x, unit_long,
+                                tried.get(short_v, 0.0), long_v, mk[long_v], side[long_v], coef[long_v], floor)
+        if price is not None:
+            await self._send(t, Order(short_v, mk[short_v], side[short_v], "buy", x, price), coef[short_v], got)
+            x = math.floor(got[long_v].held - got[short_v].held + EPS)
+            if x < 1:
+                return
         sale = await self._send(t, Order(long_v, mk[long_v], side[long_v], "sell", x, floor, reduce_only=True),
                                 coef[long_v], got)
         if sale.filled > EPS:
@@ -464,6 +578,28 @@ class LiveTrader(PaperTrader):
                 f"{left:g} {side[long_v].upper()} contracts left unhedged in {mk[long_v]} on {NAMES[long_v]}: "
                 f"nothing bid {floor:.2f} or more to sell them back"))
 
+    def _finish_at(self, short_v: str, market: str, side: str, coef: float, x: int, unit_long: float, tried: float,
+                   long_v: str, long_market: str, long_side: str, long_coef: float, floor: float) -> float | None:
+        """The price at which buying the ``x`` missing contracts loses less than selling
+        the unhedged ones back would, by the books as they stand, or None to sell back.
+        Never more than ``live_unwind_max_loss`` a contract, the most a sale may lose."""
+        asks = self._ladder(short_v, market, side)
+        need = limit_for(asks, x) if asks else None
+        if need is None:
+            return None
+        price = tick_up(need)
+        if price <= tried + EPS:
+            return None  # an order just offered that much there and came up short
+        finish = unit_long + price + per_contract(coef, price) - 1.0
+        bids = self._ladder(long_v, long_market, _opposite(long_side))  # an offer of the other side at p bids 1 - p
+        bid = round(1.0 - bids[0][0], 4) if bids else None
+        sell = math.inf if bid is None or bid < floor - EPS else unit_long - (bid - per_contract(long_coef, bid))
+        if finish > min(sell, self.cfg.live_unwind_max_loss) + EPS:
+            return None
+        if x * (price + coef / 4) > self._cash(short_v, market) - CASH_MARGIN:
+            return None
+        return price
+
     def _finish(self, t: dict, got: dict[str, Fills], lead: str, steady: dict, stopped: str | None) -> None:
         """Write the trade up the way paper trades are, and move the account's cash."""
         hold = {v: got[v].held for v in VENUES}
@@ -474,7 +610,7 @@ class LiveTrader(PaperTrader):
         t.update(k_qty=got["K"].bought, p_qty=got["P"].bought, k_fees=got["K"].fees, p_fees=got["P"].fees,
                  k_hold=hold["K"], p_hold=hold["P"], k_out=out["K"], p_out=out["P"],
                  locked_profit=min(hold["K"], hold["P"]) - out["K"] - out["P"])
-        if hold["K"] < 1 and hold["P"] < 1 and stopped is None:
+        if hold["K"] < DUST and hold["P"] < DUST and stopped is None:
             moved = abs(out["K"]) + abs(out["P"]) > EPS
             t.update(status="settled" if moved else "missed", settled_ts=time.time(), payout_k=0.0, payout_p=0.0,
                      pnl=-out["K"] - out["P"], note="unwound" if moved else "no fill")
@@ -483,7 +619,9 @@ class LiveTrader(PaperTrader):
         else:
             t["status"] = "open"
             self.guard.record_pnl(-early_loss(t))  # a leftover leg sold back: lost now, not at settlement
-            notes = [f"{abs(hold['K'] - hold['P']):g} contracts unhedged"] if abs(hold["K"] - hold["P"]) >= 1 else []
+            # Polymarket US can fill part of a contract; Kalshi's leg is whole contracts,
+            # and under one contract nothing is sold back. It's held, and said.
+            notes = [f"{abs(hold['K'] - hold['P']):g} contracts unhedged"] if abs(hold["K"] - hold["P"]) >= DUST else []
             t["note"] = "; ".join(notes + ([f"stopped: {stopped}"] if stopped else [])) or None
             self.open[t["id"]] = t
             for v in VENUES:
@@ -510,13 +648,15 @@ class LiveRun:
     """The live trader with its limits, journal and stop file, for the streaming scanner."""
 
     def __init__(self, cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi: KalshiTrading, pm: PMTrading,
-                 feeds_fresh=None, wake=None):
+                 feeds_fresh=None, wake=None, reprice=None):
+        """``reprice(slug)``: price the pairs on a Polymarket US market again (its book was just checked)."""
         self.cfg, self.kalshi, self.pm, self.db = cfg, kalshi, pm, db
         folder = Path(cfg.db_path).parent
         self.guard = LiveGuard(cfg, kmeta, folder / HALT_FILE, feeds_fresh)
         self.journal = Journal(folder / JOURNAL_FILE)
+        self.check = confirm.BookCheck(pm.book, pbooks, reprice)
         self.trader = LiveTrader(cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi, pm, self.guard, self.journal,
-                                 wake=wake)
+                                 wake=wake, check=self.check)
         self.shards = Rebalancer(kalshi, self.guard, self.trader, kmeta) if cfg.live_shard_rebalance else None
         if self.shards is not None:
             self.guard.on_short = self.shards.ran_short
@@ -567,7 +707,9 @@ class LiveRun:
                            "max_stake_frac": cfg.live_max_stake_frac,
                            "min_profit": cfg.live_min_profit_usd, "daily_loss": cfg.live_daily_loss_usd,
                            "unwind_max_loss": cfg.live_unwind_max_loss,
-                           "shards": self.shards.snapshot() if self.shards is not None else None}}
+                           "shards": self.shards.snapshot() if self.shards is not None else None},
+                "execution": {"lead": cfg.live_lead_venue, "settle_s": cfg.live_settle_s,
+                              "quiet_s": cfg.paper_quiet_s, "cool_s": COOL_S, "book_check": self.check.snapshot()}}
 
 
 # --- arbscan live-check / live-halt / live-resume --------------------------------------

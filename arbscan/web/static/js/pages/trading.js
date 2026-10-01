@@ -9,7 +9,7 @@ const RANGES = [
 ];
 const VIEWS = [{ value: "all", label: "All" }, { value: "open", label: "Open" }, { value: "settled", label: "Settled" }];
 const VENUE = { K: "Kalshi", P: "Polymarket US" };
-const NOT_SKIPS = new Set(["sent", "open", "unwound", "missed"]);
+const NOT_SKIPS = new Set(["sent", "open", "unwound", "missed", "confirming the book"]);
 // Shards that hold Kalshi's markets, as far as the live trader has seen them.
 const SHARD_NAME = { 0: "everything else", 3: "tennis · baseball · basketball" };
 
@@ -191,12 +191,17 @@ function Execution({ a, orders }) {
   };
   const problem = orders?.problems?.[0];
   const probe = a?.latency;
+  const ex = a?.execution, check = ex?.book_check;
   return html`<${Card} title="Execution" sub="Orders sent, and why picks were passed over">
     <dl class="facts">
       <dt>Kalshi orders</dt><dd>${sent("K")}</dd>
       <dt>Polymarket US orders</dt><dd>${sent("P")}</dd>
       <dt title="Signed read-only requests every few seconds, between trades">Round trip right now</dt>
       <dd>${probe ? `Kalshi ${ms(probe.K.rtt_p50_ms)} ms · Polymarket US ${ms(probe.P.rtt_p50_ms)} ms` : "—"}</dd>
+      <dt title="Which leg's order goes first. A first leg that finds nothing costs nothing; the other follows for what it filled.">First leg</dt>
+      <dd>${ex ? (VENUE[ex.lead] || "Whichever price moved last") : "—"}</dd>
+      <dt title="Before a trade, the Polymarket US book is read straight from the exchange. A streamed book that had stopped updating is repaired, and the pick priced on it is dropped.">Polymarket US book checks</dt>
+      <dd>${check ? html`<span class="num">${int(check.reads)}</span>${check.frozen ? html` <span class="bad">· ${int(check.frozen)} frozen ${check.frozen === 1 ? "book" : "books"} caught</span>` : html` <span class="muted">· none frozen</span>`}` : "—"}</dd>
     </dl>
     <div class="skips">
       <div class="skips-head">Picks passed over <span class="muted">since the last restart</span></div>

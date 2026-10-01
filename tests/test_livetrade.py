@@ -201,6 +201,7 @@ class LiveHarness(Harness):
         self.guard = LiveGuard(self.cfg, self.kmeta, folder / livetrade.HALT_FILE, lambda pair: self.fresh)
         g = self.guard
         g.series, g.shard_cash, g.pm_cash, g.attested_until = {"K"}, {0: 100.0}, 100.0, time.time() + 4 * DAY
+        g.k_trading, g.k_trading_ts = {-1: True}, time.time() + 3600  # Kalshi is trading
         self.journal = Journal(folder / livetrade.JOURNAL_FILE)
         pm = PMTrading(self.http, P_BASE, SIGNER)
         # ``checked``: with the Polymarket book checked against the exchange before a trade.
@@ -912,3 +913,46 @@ def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp
     h.trade(window=2.0)
     assert len(h.trades()) == 1 and len(h.ex.sent) == 3  # and no trade for a minute
     assert h.trader.stats["Kalshi trading paused"] == 1
+
+
+
+# --- the circuit breaker ----------------------------------------------------------------------
+
+def test_a_market_that_needed_a_sell_back_isnt_traded_again_today(tmp_path):
+    h = LiveHarness(tmp_path, live_max_sellbacks_per_hour=0)  # (breaker off: just the market)
+    h.market()
+    h.ex.book("K", "K-1", "yes", [])  # Kalshi's offer is gone: Polymarket's leg is sold back
+    h.ex.book("P", "p-1", "yes", [(0.52, 100)])
+    t = h.trade()
+    assert t["note"] == "unwound" and h.guard.cooling["K-1"] > time.time() + 3600
+    h.market()
+    h.trade(window=2.0)
+    assert len(h.trades()) == 1 and h.trader.stats["an order there just missed"] == 1
+
+
+def test_two_sell_backs_within_an_hour_stop_trading_even_after_a_restart(tmp_path):
+    h = LiveHarness(tmp_path)
+    assert h.cfg.live_max_sellbacks_per_hour == 2
+    h.guard.sold_back(["K-9", "p-9"], at=time.time() - 1800)  # one earlier, in another market
+    h.market()
+    h.ex.book("K", "K-1", "yes", [])
+    h.ex.book("P", "p-1", "yes", [(0.52, 100)])
+    t = h.trade()
+    assert t["note"] == "unwound" and "2 trades had to sell a leg back within an hour" in h.guard.halted
+    assert (tmp_path / livetrade.HALT_FILE).exists()
+    # Remembered from the record after a restart (the stop file stays too).
+    (tmp_path / livetrade.HALT_FILE).unlink()
+    again = h.new_trader()
+    assert again.guard.sellbacks and again.guard.cooling.get("p-1", 0) > time.time() + 3600
+    assert again.guard.halted is None  # remembered, but a restart doesn't stop it again by itself
+    assert len(again.guard.sellbacks) == 1  # (the earlier one was only in memory)
+
+
+def test_nothing_is_traded_on_a_stale_kalshi_status(tmp_path):
+    h = LiveHarness(tmp_path)
+    h.market()
+    h.guard.k_trading_ts = time.time() - 120  # its last read is two minutes old (reads failing)
+    assert h.trade() is None and not h.ex.sent and h.trader.stats["Kalshi trading paused"] == 1
+    h.guard.k_trading = None
+    h.guard.k_trading_ts = time.time()
+    assert h.guard.kalshi_closed("K-1")  # never read: closed

@@ -41,7 +41,11 @@ Before any order, three things a pick must pass that paper trading doesn't ask f
   ``live_settle_s``, as well as the newer one ``paper_quiet_s``.
 - **No miss on that market just now**: a first leg that found nothing keeps the market
   out for ``COOL_S``.
-- **Kalshi is trading**: its exchange status (read with the account) says the market's
+- **No sell-back in that market today**, and fewer than ``live_max_sellbacks_per_hour``
+  anywhere in the last hour: the next one stops trading (a circuit breaker; on
+  2026-10-01 a closed Kalshi made the old trader sell back eight trades in a row).
+- **Kalshi is trading**: its exchange status (read with the account, and no older than
+  ``STATUS_MAX_AGE_S``) says the market's
   shard takes orders, its published hours don't close it within ``CLOSE_MARGIN_S``
   (every Thursday 03:00-05:00 ET), and no order was just turned away as paused. Its
   books stay up while it's closed, so the scanner goes on seeing windows there.
@@ -91,6 +95,8 @@ COOL_S = 60.0  # a market whose first leg found nothing is left alone this long
 SCHEDULE_EVERY_S = 3600.0  # re-read Kalshi's trading hours
 CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
 PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
+STATUS_MAX_AGE_S = 90.0  # a read of Kalshi's exchange status older than this vouches for nothing
+SELLBACK_WINDOW_S = 3600.0  # the circuit breaker counts sell-backs over this long
 ET = ZoneInfo("America/New_York")  # Kalshi's schedule is in Eastern time
 DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 CASH_MARGIN = 0.10  # leave this much of a venue's real cash unspent (fees round up)
@@ -260,6 +266,8 @@ class LiveGuard(Guard):
         self.stake_cap = lambda: 0.0
         self.cooling: dict[str, float] = {}  # market -> when a pick on it may be taken again
         self.k_trading: dict[int, bool] | None = None  # shard -> takes orders now (-1: the whole exchange)
+        self.k_trading_ts = 0.0  # when it was read
+        self.sellbacks: list[float] = []  # when trades had to sell a leg back (or left one unhedged)
         self.k_schedule: dict | None = None
         self.k_paused_until = 0.0
 
@@ -291,10 +299,11 @@ class LiveGuard(Guard):
         now = time.time()
         if now < self.k_paused_until:
             return True
-        if self.k_trading is not None:
-            shard = getattr(self.kmeta.get(ticker), "shard", 0)
-            if not self.k_trading.get(shard, self.k_trading.get(-1, True)):
-                return True
+        if self.k_trading is None or now - self.k_trading_ts > STATUS_MAX_AGE_S:
+            return True  # not known to be trading: as good as closed
+        shard = getattr(self.kmeta.get(ticker), "shard", 0)
+        if not self.k_trading.get(shard, self.k_trading.get(-1, True)):
+            return True
         if self.k_schedule and not (kalshi_open(self.k_schedule, now)
                                     and kalshi_open(self.k_schedule, now + CLOSE_MARGIN_S)):
             return True
@@ -305,7 +314,7 @@ class LiveGuard(Guard):
         self.k_paused_until = time.time() + PAUSED_S
 
     async def read_exchange(self, kalshi: KalshiTrading, schedule: bool) -> None:
-        self.k_trading = await kalshi.trading_status()
+        self.k_trading, self.k_trading_ts = await kalshi.trading_status(), time.time()
         if schedule:
             self.k_schedule = await kalshi.schedule()
 
@@ -320,11 +329,24 @@ class LiveGuard(Guard):
             return "an order there just missed"
         return Guard.__call__(self, pair, days)
 
-    def cool(self, market: str) -> None:
+    def cool(self, market: str, until: float | None = None) -> None:
         """Leave ``market`` alone for a while: an order there found nothing of what its book showed."""
         now = time.time()
         self.cooling = {m: t for m, t in self.cooling.items() if t > now}
-        self.cooling[market] = now + COOL_S
+        self.cooling[market] = max(self.cooling.get(market, 0.0), until or now + COOL_S)
+
+    def sold_back(self, markets, at: float | None = None, stop: bool = True) -> None:
+        """A trade had to sell a leg back, or left one unhedged: its markets aren't traded
+        again today, and once ``live_max_sellbacks_per_hour`` have in an hour, trading stops."""
+        at = time.time() if at is None else at
+        midnight = datetime.combine(date.fromtimestamp(at), datetime.min.time()).timestamp()
+        for m in markets:
+            self.cool(m, until=midnight + 86400)
+        self.sellbacks = [t for t in self.sellbacks if t > at - SELLBACK_WINDOW_S] + [at]
+        n, limit = len(self.sellbacks), self.cfg.live_max_sellbacks_per_hour
+        if stop and limit and n >= limit and not self.halted:
+            self.halt(f"{n} trades had to sell a leg back within an hour (the limit is {limit}): something "
+                      "is wrong with one venue's books or orders; check before resuming")
 
     def _roll(self) -> None:
         if date.today() != self.day:
@@ -395,10 +417,15 @@ class LiveTrader(PaperTrader):
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
-        for r in db.execute(f"SELECT ts, status, settled_ts, pnl, unwind_loss, locked_profit, note FROM {self.table} "
-                            "WHERE ts >= ? OR settled_ts >= ?", (midnight, midnight)):
+        for r in db.execute(f"SELECT ts, pair, status, settled_ts, pnl, unwind_qty, unwind_loss, locked_profit, k_hold, "
+                            f"p_hold, note FROM {self.table} WHERE ts >= ? OR settled_ts >= ? ORDER BY ts",
+                            (midnight, midnight)):
             r = dict(r)
             guard.trades_today += r["ts"] >= midnight
+            if r["ts"] >= midnight and ((r["unwind_qty"] or 0) > EPS
+                                        or abs((r["k_hold"] or 0) - (r["p_hold"] or 0)) >= 1):
+                # The breaker remembers them across restarts; a stop they caused is in the stop file.
+                guard.sold_back(r["pair"].split("|", 1), at=r["ts"], stop=False)
             if r["ts"] >= midnight:
                 guard.record_pnl(-early_loss(r))
             if r["status"] == "settled" and (r["settled_ts"] or 0) >= midnight:
@@ -719,6 +746,8 @@ class LiveTrader(PaperTrader):
                 self.tied[v] += out[v]
         self.stats[t["status"] if t["status"] != "settled" else "unwound"] += 1
         self._write(t)
+        if (t.get("unwind_qty") or 0) > EPS or abs(hold["K"] - hold["P"]) >= 1:
+            self.guard.sold_back(t["pair"].split("|", 1))
         log.info("live %s %s %s: planned %d for $%.2f, got K %g / P %g, locked $%.2f", t["status"], t["pair"],
                  t["direction"], t["planned_size"], t["planned_profit"], hold["K"], hold["P"], t["locked_profit"])
 

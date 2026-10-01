@@ -41,6 +41,10 @@ Before any order, three things a pick must pass that paper trading doesn't ask f
   ``live_settle_s``, as well as the newer one ``paper_quiet_s``.
 - **No miss on that market just now**: a first leg that found nothing keeps the market
   out for ``COOL_S``.
+- **Kalshi is trading**: its exchange status (read with the account) says the market's
+  shard takes orders, its published hours don't close it within ``CLOSE_MARGIN_S``
+  (every Thursday 03:00-05:00 ET), and no order was just turned away as paused. Its
+  books stay up while it's closed, so the scanner goes on seeing windows there.
 
 Every order is written to a journal file (``live_journal.jsonl`` next to the
 database) before it's sent and again once its outcome is known, and kept in
@@ -62,11 +66,12 @@ import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import confirm
 from .dryrun import SERIES_SQL, Guard, clean_series
 from .fees import order_fee, per_contract
-from .orders import EPS, KalshiTrading, Order, PMTrading, Result, record, status_of
+from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
 from .paper import VENUES, PaperTrader, _opposite, breakeven_price, limit_for
 from .shards import Rebalancer
 from .store import open_db
@@ -83,6 +88,11 @@ ORDER_GAP_S = 0.1
 RESOLVE_WAITS_S = (1.5, 3.0)  # read an unclear order's position this long after it, then again
 MAX_REJECTS = 3  # stop after this many rejected orders in a row
 COOL_S = 60.0  # a market whose first leg found nothing is left alone this long
+SCHEDULE_EVERY_S = 3600.0  # re-read Kalshi's trading hours
+CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
+PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
+ET = ZoneInfo("America/New_York")  # Kalshi's schedule is in Eastern time
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 CASH_MARGIN = 0.10  # leave this much of a venue's real cash unspent (fees round up)
 TICK = 0.01  # orders the trader prices itself go on whole cents, a valid price on every market
 DUST = 0.005  # contracts: less than this held is nothing held
@@ -193,10 +203,48 @@ def early_loss(t) -> float:
     return max(0.0, t.get("unwind_loss") or 0.0, -(t.get("locked_profit") or 0.0))
 
 
+def _hhmm(text: str) -> int:
+    h, m = text.split(":")
+    return int(h) * 60 + int(m)
+
+
+def kalshi_open(schedule: dict, at: float) -> bool:
+    """Whether Kalshi's published hours (``/exchange/schedule``) have it trading at ``at``.
+    Its standard hours list each weekday's open periods in Eastern time ("00:00" as a
+    close is midnight at the end of the day); maintenance windows close it as well."""
+    for w in schedule.get("maintenance_windows") or []:
+        start, end = (_when(w.get(k)) for k in ("start_datetime", "end_datetime"))
+        if start is not None and end is not None and start <= at < end:
+            return False
+    t = datetime.fromtimestamp(at, ET)
+    now = t.hour * 60 + t.minute
+    for period in schedule.get("standard_hours") or []:
+        start, end = _when(period.get("start_time")), _when(period.get("end_time"))
+        if (start is not None and at < start) or (end is not None and at >= end):
+            continue
+        hours = period.get(DAYS[t.weekday()])
+        if hours is None:
+            continue
+        for h in hours:
+            o, c = _hhmm(h["open_time"]), _hhmm(h["close_time"]) or 24 * 60
+            if o <= now < c:
+                return True
+        return False
+    return True  # no hours published for now: go by the exchange's status alone
+
+
+def _when(text) -> float | None:
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
 class LiveGuard(Guard):
     """The dry run's limits plus the live trader's own; see the module docstring."""
 
-    transient = frozenset({"a trade in flight", "feed not fresh", "an order there just missed"})  # look again shortly
+    transient = frozenset({"a trade in flight", "feed not fresh", "an order there just missed",
+                           "Kalshi trading paused"})  # look again shortly
 
     def __init__(self, cfg, kmeta: dict, halt_path, feeds_fresh=None):
         super().__init__(cfg, kmeta)
@@ -211,6 +259,9 @@ class LiveGuard(Guard):
         self.on_short = None  # told (shard, dollars) when a pick finds too little cash on its Kalshi shard
         self.stake_cap = lambda: 0.0
         self.cooling: dict[str, float] = {}  # market -> when a pick on it may be taken again
+        self.k_trading: dict[int, bool] | None = None  # shard -> takes orders now (-1: the whole exchange)
+        self.k_schedule: dict | None = None
+        self.k_paused_until = 0.0
 
     def __call__(self, pair, days) -> str | None:
         if self.halted:
@@ -222,6 +273,8 @@ class LiveGuard(Guard):
             return "daily trade limit"
         if not self.feeds_fresh(pair):
             return "feed not fresh"
+        if self.kalshi_closed(pair.kalshi):
+            return "Kalshi trading paused"
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         why = super().__call__(pair, days)
@@ -230,11 +283,39 @@ class LiveGuard(Guard):
             self.on_short(shard, self.stake_cap() - self.shard_cash.get(shard, 0.0))
         return why
 
+    def kalshi_closed(self, ticker: str) -> bool:
+        """Kalshi won't take an order in ``ticker`` now, or a trade started now could
+        still be under way when it closes: its weekly maintenance, a halt, a shard
+        paused. Trading one leg while the other can't be traded is how a trade ends up
+        sold back or left unhedged."""
+        now = time.time()
+        if now < self.k_paused_until:
+            return True
+        if self.k_trading is not None:
+            shard = getattr(self.kmeta.get(ticker), "shard", 0)
+            if not self.k_trading.get(shard, self.k_trading.get(-1, True)):
+                return True
+        if self.k_schedule and not (kalshi_open(self.k_schedule, now)
+                                    and kalshi_open(self.k_schedule, now + CLOSE_MARGIN_S)):
+            return True
+        return False
+
+    def kalshi_paused(self) -> None:
+        """An order was just turned away for paused trading."""
+        self.k_paused_until = time.time() + PAUSED_S
+
+    async def read_exchange(self, kalshi: KalshiTrading, schedule: bool) -> None:
+        self.k_trading = await kalshi.trading_status()
+        if schedule:
+            self.k_schedule = await kalshi.schedule()
+
     def passing(self, pair, days) -> str | None:
         """The refusals that outlast a moment (``__call__`` without the passing ones, and
         without telling anyone a shard ran short): is this pair worth getting ready for?"""
         if self.halted:
             return "halted"
+        if self.kalshi_closed(pair.kalshi):
+            return "Kalshi trading paused"
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         return Guard.__call__(self, pair, days)
@@ -445,6 +526,10 @@ class LiveTrader(PaperTrader):
             if self.rejects >= MAX_REJECTS and not self.guard.halted:
                 self.guard.halt(f"the last {self.rejects} orders were rejected (latest: {self.last_reject})")
 
+    def _open(self, venue: str, market: str) -> bool:
+        """The venue takes orders in ``market`` now."""
+        return venue != "K" or not self.guard.kalshi_closed(market)
+
     @staticmethod
     def _met_book(res: Result) -> bool:
         """The order reached the book and took what was there at its limit: one that was
@@ -484,7 +569,9 @@ class LiveTrader(PaperTrader):
             t[key] = 1000 * ((res.exch_ts or res.sent + res.rtt_ms / 2000) - t["ts"])
         log.info("live %s %s %g %s in %s at %.4f: %s, filled %g%s", NAMES[o.venue], o.action, o.qty, o.side.upper(),
                  o.market, o.limit, res.status, res.filled, f" [{res.error}]" if res.error else "")
-        if res.status == "rejected":
+        if res.status == "rejected" and o.venue == "K" and paused(res.reply):
+            self.guard.kalshi_paused()  # the exchange's state, not a fault in the order: no halt for it
+        elif res.status == "rejected":
             self.rejects, self.last_reject = self.rejects + 1, f"{NAMES[o.venue]} {o.market}: {res.error}"
         elif res.status == "unknown":
             raise Halt(self.guard.halt(
@@ -550,6 +637,8 @@ class LiveTrader(PaperTrader):
         unit_long = got[long_v].out / got[long_v].held  # each unhedged contract's cost, fees included
         cap = tick_down(breakeven_price(coef[short_v], 1.0 - unit_long))
         tried = {} if tried is None else tried
+        if not self._open(short_v, mk[short_v]):
+            tried[short_v] = 1.0  # nothing can be bought there now: straight to selling back
         if cap >= TICK and cap > tried.get(short_v, 0.0) + EPS:
             res = await self._send(t, Order(short_v, mk[short_v], side[short_v], "buy", x, cap), coef[short_v], got)
             if self._met_book(res):
@@ -583,6 +672,8 @@ class LiveTrader(PaperTrader):
         """The price at which buying the ``x`` missing contracts loses less than selling
         the unhedged ones back would, by the books as they stand, or None to sell back.
         Never more than ``live_unwind_max_loss`` a contract, the most a sale may lose."""
+        if not self._open(short_v, market):
+            return None
         asks = self._ladder(short_v, market, side)
         need = limit_for(asks, x) if asks else None
         if need is None:
@@ -669,7 +760,7 @@ class LiveRun:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Keep the stop file, the settlement records and the account current."""
-        next_records = next_account = 0.0
+        next_records = next_account = next_schedule = 0.0
         while not stop.is_set():
             self.guard.poll()
             now = time.monotonic()
@@ -686,6 +777,15 @@ class LiveRun:
                     self.trader.sync_cash()
                 except Exception as e:
                     log.warning("live: reading the accounts failed: %s", e)
+                try:
+                    was = self.guard.k_trading
+                    await self.guard.read_exchange(self.kalshi, schedule=now >= next_schedule)
+                    if now >= next_schedule:
+                        next_schedule = now + SCHEDULE_EVERY_S
+                    if was is not None and was.get(-1, True) != self.guard.k_trading.get(-1, True):
+                        log.warning("live: Kalshi trading %s", "resumed" if self.guard.k_trading.get(-1) else "paused")
+                except Exception as e:
+                    log.warning("live: reading Kalshi's exchange status failed: %s", e)
                 if self.shards is not None and not self.trader.account_stale:
                     try:
                         if await self.shards.step(self.db):
@@ -708,7 +808,8 @@ class LiveRun:
                            "min_profit": cfg.live_min_profit_usd, "daily_loss": cfg.live_daily_loss_usd,
                            "unwind_max_loss": cfg.live_unwind_max_loss,
                            "shards": self.shards.snapshot() if self.shards is not None else None},
-                "execution": {"lead": cfg.live_lead_venue, "settle_s": cfg.live_settle_s,
+                "execution": {"kalshi_open": not g.kalshi_closed(""), "lead": cfg.live_lead_venue,
+                              "settle_s": cfg.live_settle_s,
                               "quiet_s": cfg.paper_quiet_s, "cool_s": COOL_S, "book_check": self.check.snapshot()}}
 
 

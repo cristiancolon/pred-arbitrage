@@ -101,6 +101,13 @@ def _ts(v) -> float | None:
         return None
 
 
+def paused(reply: Any) -> bool:
+    """Kalshi's reply to an order sent while trading is paused (its weekly maintenance,
+    Thursdays 03:00-05:00 ET, or a halt): HTTP 409, ``trading_is_paused``."""
+    err = reply.get("error") if isinstance(reply, dict) else None
+    return isinstance(err, dict) and err.get("code") == "trading_is_paused"
+
+
 class _Venue:
     def __init__(self, client: httpx.AsyncClient, base: str, signer):
         self.client, self.base, self.signer = client, base.rstrip("/"), signer
@@ -145,10 +152,16 @@ class _Venue:
             return self.parse(o, res.reply, res)
         res.error = f"HTTP {r.status_code}: {r.text[:300]}"
         # A 4xx is an order the exchange refused; 409 (Kalshi: that client order id
-        # was already used) and anything 5xx leave it unknown.
-        if 400 <= r.status_code < 500 and r.status_code != 409:
+        # was already used) and anything 5xx leave it unknown, unless the reply says
+        # it was turned away (Kalshi: trading paused).
+        if 400 <= r.status_code < 500 and (r.status_code != 409 or self.refused(res.reply)):
             res.status = "rejected"
         return res
+
+    @staticmethod
+    def refused(reply: Any) -> bool:
+        """A 409 reply that says the order was turned away, not that it may have gone through."""
+        return False
 
     @staticmethod
     def parse(o: Order, reply: Any, res: Result) -> Result:
@@ -170,6 +183,22 @@ class KalshiTrading(_Venue):
 
     async def place(self, o: Order) -> Result:
         return await self._place(o, KALSHI_ORDERS, self.body(o), (200, 201))
+
+    @staticmethod
+    def refused(reply: Any) -> bool:
+        return paused(reply)
+
+    async def trading_status(self) -> dict[int, bool]:
+        """Whether each exchange shard takes orders now (key -1: the exchange as a whole)."""
+        j = await self._get("/exchange/status")
+        out = {-1: bool(j.get("trading_active", True))}
+        for x in j.get("exchange_index_statuses") or []:
+            out[int(x.get("exchange_index") or 0)] = bool(x.get("trading_active", True)) and out[-1]
+        return out
+
+    async def schedule(self) -> dict:
+        """The exchange's trading hours and maintenance windows."""
+        return (await self._get("/exchange/schedule")).get("schedule") or {}
 
     @staticmethod
     def parse(o: Order, reply: Any, res: Result) -> Result:

@@ -26,6 +26,11 @@ K_BASE = "https://k.example/trade-api/v2"
 P_BASE = "https://p.example"
 SIGNER = type("S", (), {"headers": lambda self, m, p: {}})()
 COEF = {"K": 0.07, "P": 0.0695}
+ALL_DAY = [{"open_time": "00:00", "close_time": "00:00"}]
+SCHEDULE = {"maintenance_windows": [], "standard_hours": [{  # Kalshi's, as published on 2026-10-01
+    "start_time": "2024-12-01T00:00:00Z", "end_time": "2200-12-01T00:00:00Z",
+    **{d: ALL_DAY for d in ("monday", "tuesday", "wednesday", "friday", "saturday", "sunday")},
+    "thursday": [{"open_time": "00:00", "close_time": "03:00"}, {"open_time": "05:00", "close_time": "00:00"}]}]}
 
 
 class Exchange:
@@ -44,6 +49,7 @@ class Exchange:
         self.sent: list[tuple[str, dict]] = []
         self.fail_reads = False
         self.book_reads: list[str] = []
+        self.k_trading = True
         self.on_order = None  # called with (venue, body) as each order arrives
         self.book_time = "2026-09-28T12:00:00Z"  # when the Polymarket books last changed
 
@@ -99,6 +105,8 @@ class Exchange:
             how = self.script[venue].pop(0) if self.script[venue] else "fill"
             if how == "reject":
                 return httpx.Response(400, json={"error": {"code": "insufficient_balance"}})
+            if how == "paused":
+                return httpx.Response(409, json={"error": {"code": "trading_is_paused", "message": "trading is paused"}})
             if how == "500":
                 return httpx.Response(500, text="oops")
             reply = self._kalshi_order(body) if venue == "K" else self._pm_order(body)
@@ -115,6 +123,11 @@ class Exchange:
         if venue == "K" and path.endswith("/portfolio/balance"):
             return httpx.Response(200, json={"balance_breakdown": [{"balance": f"{c:.4f}", "exchange_index": s}
                                                                    for s, c in self.cash["K"].items()]})
+        if venue == "K" and path.endswith("/exchange/status"):
+            return httpx.Response(200, json={"trading_active": self.k_trading, "exchange_index_statuses": [
+                {"exchange_index": i, "trading_active": self.k_trading} for i in (0, 3)]})
+        if venue == "K" and path.endswith("/exchange/schedule"):
+            return httpx.Response(200, json={"schedule": SCHEDULE})
         if venue == "K" and path.endswith("/api_keys"):
             lapses = int(time.time() + 5 * DAY)
             return httpx.Response(200, json={"api_keys": [], "api_key_region_expiration_ts": lapses})
@@ -838,3 +851,62 @@ def test_an_answer_that_cant_vouch_for_the_book_is_an_error(tmp_path):
         assert h.trade(window=2.0) is None and h.check.errors == 2 and not h.check.pending
     finally:
         confirm.READ_TIMEOUT_S = old
+
+
+
+# --- Kalshi closed --------------------------------------------------------------------------
+
+def et(text):
+    from datetime import datetime
+    return datetime.fromisoformat(text).replace(tzinfo=livetrade.ET).timestamp()
+
+
+def test_kalshis_hours_close_it_every_thursday_morning():
+    assert livetrade.kalshi_open(SCHEDULE, et("2026-09-30T03:30"))  # a Wednesday
+    assert livetrade.kalshi_open(SCHEDULE, et("2026-10-01T02:59"))
+    assert not livetrade.kalshi_open(SCHEDULE, et("2026-10-01T03:00"))
+    assert not livetrade.kalshi_open(SCHEDULE, et("2026-10-01T04:59"))
+    assert livetrade.kalshi_open(SCHEDULE, et("2026-10-01T05:00"))
+    assert livetrade.kalshi_open(SCHEDULE, et("2026-10-01T23:59"))
+    window = {"start_datetime": "2026-10-03T14:00:00Z", "end_datetime": "2026-10-03T15:00:00Z"}
+    assert not livetrade.kalshi_open({**SCHEDULE, "maintenance_windows": [window]}, et("2026-10-03T10:30"))
+    assert livetrade.kalshi_open({}, et("2026-10-01T04:00"))  # nothing published: the status decides
+
+
+def test_nothing_is_traded_while_kalshi_is_closed_or_about_to_close(tmp_path):
+    h = LiveHarness(tmp_path)
+    h.market()
+    h.ex.k_trading = False
+    asyncio.run(h.guard.read_exchange(h.trader.venues["K"], schedule=True))
+    assert h.guard.k_schedule == SCHEDULE
+    assert h.trade() is None and not h.ex.sent and h.trader.stats["Kalshi trading paused"] == 1
+    assert (PAIR.id, "K:YES+P:NO") not in h.trader.traded  # looked at again once it opens
+    h.ex.k_trading = True
+    asyncio.run(h.guard.read_exchange(h.trader.venues["K"], schedule=False))
+    h.guard.k_schedule = {"standard_hours": [{d: [{"open_time": "00:00", "close_time": "00:00"}] for d in livetrade.DAYS}]}
+    assert h.trade(window=2.0)["status"] == "open"
+    # A minute before a scheduled close, no trade starts.
+    from datetime import datetime
+    now_et = datetime.now(livetrade.ET)
+    mins = now_et.hour * 60 + now_et.minute + 1
+    if mins < 24 * 60:  # (not across midnight)
+        day = livetrade.DAYS[now_et.weekday()]
+        h.guard.k_schedule = {"standard_hours": [{day: [{"open_time": "00:00", "close_time": f"{mins // 60:02d}:{mins % 60:02d}"}]}]}
+        assert h.guard.kalshi_closed("K-1")
+
+
+def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp_path):
+    h = LiveHarness(tmp_path)
+    h.market()
+    h.ex.book("P", "p-1", "yes", [(0.52, 100)])  # Polymarket's NO is bid 48c
+    h.ex.script["K"] = ["paused"]
+    t = h.trade()
+    # Polymarket filled, Kalshi said trading is paused: no second try there, Polymarket sold back.
+    assert [(v, b.get("intent", "K")) for v, b in h.ex.sent] == [
+        ("P", "ORDER_INTENT_BUY_SHORT"), ("K", "K"), ("P", "ORDER_INTENT_SELL_SHORT")]
+    assert h.orders()[1]["status"] == "rejected" and h.trader.rejects == 0 and h.guard.halted is None
+    assert (t["status"], t["note"]) == ("settled", "unwound")
+    h.market()
+    h.trade(window=2.0)
+    assert len(h.trades()) == 1 and len(h.ex.sent) == 3  # and no trade for a minute
+    assert h.trader.stats["Kalshi trading paused"] == 1

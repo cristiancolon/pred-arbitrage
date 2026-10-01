@@ -280,7 +280,7 @@ outcome is known, and kept in `live_orders` (mode `live`).
 **Filling both legs.** In its first two days the live trader sold a leg back on 6 of
 45 trades (5 completely), always the same way: the first leg filled and the second
 found nothing at the price the scanner had seen. The orders and recorded quotes show
-three causes, and what the trader now does about each:
+three causes, and what the trader now does about each (and a fourth, found later):
 
 - *A frozen Polymarket US book* (3 trades). Its stream has no sequence numbers, and on
   2026-09-29 it went silent for single markets for up to five minutes, with the
@@ -299,6 +299,13 @@ three causes, and what the trader now does about each:
   `paper_quiet_s`, but the market was still repricing and Kalshi's quote was gone
   280 ms later. Now the older of the two prices must have held still `live_settle_s`
   (3 s) as well.
+
+- *Kalshi closed* (seen on 2026-10-01 after the above: 3 trades). Kalshi stops taking
+  orders every Thursday 03:00-05:00 ET (its published hours), but its books stay up, so
+  windows kept appearing; Polymarket filled and Kalshi answered `trading_is_paused`.
+  Now no trade starts while Kalshi's exchange status says the market's shard isn't
+  trading, within 2 minutes of a scheduled close, or for a minute after an order is
+  turned away as paused (which no longer counts toward the three-rejections stop).
 
 `arbscan backtest` replays every recorded decision (live, dry run and paper) against
 the books the scanner went on to record, under the old way of sending orders and the

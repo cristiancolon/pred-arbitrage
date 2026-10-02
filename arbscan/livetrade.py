@@ -54,8 +54,12 @@ Every order is written to a journal file (``live_journal.jsonl`` next to the
 database) before it's sent and again once its outcome is known, and kept in
 ``live_orders`` (mode ``live``).
 
+**A leg still unhedged** after that is worked on for ``live_rescue_s``: both books
+are watched and it's got out the cheaper way as soon as either allows, at a loss of up
+to ``live_rescue_max_loss`` a contract. No new trade starts meanwhile.
+
 **Stopping.** The trader stops itself by writing ``live.halt`` next to the database,
-with the reason, when a position is left unhedged, when an order's outcome can't be
+with the reason, when a position is left unhedged even so, when an order's outcome can't be
 read back, when orders keep being rejected, or when it starts up and finds an order in
 the journal whose outcome it never learned (a crash mid-trade). Creating the file by
 hand stops it too (``arbscan live-halt``). A stop lasts until the file is removed
@@ -92,6 +96,8 @@ ORDER_GAP_S = 0.1
 RESOLVE_WAITS_S = (1.5, 3.0)  # read an unclear order's position this long after it, then again
 MAX_REJECTS = 3  # stop after this many rejected orders in a row
 COOL_S = 60.0  # a market whose first leg found nothing is left alone this long
+RESCUE_EVERY_S = 5.0  # a leg left unhedged: how often the books are looked at again
+RESCUE_BLIND_EVERY = 12  # ... and every this many looks, a sell-back is tried even with no bid shown
 SCHEDULE_EVERY_S = 3600.0  # re-read Kalshi's trading hours
 CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
 PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
@@ -419,6 +425,7 @@ class LiveTrader(PaperTrader):
         self.start: dict | None = json.loads(row[0]) if row else None
         self._modelled = row is None  # cash is still deposits plus the records' flows, not yet a balance read
         self.resolve_waits = RESOLVE_WAITS_S
+        self.rescue_every = RESCUE_EVERY_S
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
@@ -696,22 +703,75 @@ class LiveTrader(PaperTrader):
             x = math.floor(got[long_v].held - got[short_v].held + EPS)
             if x < 1:
                 return
-        sale = await self._send(t, Order(long_v, mk[long_v], side[long_v], "sell", x, floor, reduce_only=True),
-                                coef[long_v], got)
-        if sale.filled > EPS:
-            received = sale.filled * (sale.avg_price if sale.avg_price is not None else floor) - sale.fees
-            t.update(unwind_venue=long_v, unwind_qty=sale.filled, unwind_loss=sale.filled * unit_long - received)
+        await self._sell_back(t, long_v, mk[long_v], side[long_v], coef[long_v], x, floor, unit_long, got)
         left = math.floor(got[long_v].held - got[short_v].held + EPS)
+        if left >= 1:
+            left = await self._rescue(t, mk, side, coef, got, long_v, short_v, unit_long)
         if left >= 1:
             raise Halt(self.guard.halt(
                 f"{left:g} {side[long_v].upper()} contracts left unhedged in {mk[long_v]} on {NAMES[long_v]}: "
-                f"nothing bid {floor:.2f} or more to sell them back"))
+                f"nothing bid {floor:.2f} or more to sell them back, and for {self.cfg.live_rescue_s / 60:g} min "
+                f"no way out at {100 * self.cfg.live_rescue_max_loss:g}c a contract or less "
+                f"(${left * unit_long:.2f} at risk)"))
+
+    async def _sell_back(self, t: dict, venue: str, market: str, side: str, coef: float, x: int, floor: float,
+                         unit_long: float, got: dict[str, Fills]) -> None:
+        sale = await self._send(t, Order(venue, market, side, "sell", x, floor, reduce_only=True), coef, got)
+        if sale.filled > EPS:
+            received = sale.filled * (sale.avg_price if sale.avg_price is not None else floor) - sale.fees
+            t.update(unwind_venue=venue, unwind_qty=(t.get("unwind_qty") or 0.0) + sale.filled,
+                     unwind_loss=(t.get("unwind_loss") or 0.0) + sale.filled * unit_long - received)
+
+    async def _rescue(self, t: dict, mk: dict, side: dict, coef: dict, got: dict[str, Fills],
+                      long_v: str, short_v: str, unit_long: float) -> int:
+        """A leg the trade's own orders left unhedged: for ``live_rescue_s`` look at both
+        books every ``rescue_every`` and get out the cheaper way once either allows it, at
+        a loss of up to ``live_rescue_max_loss`` a contract. A sell-back is also tried now
+        and then with no bid shown (a stream can lag the book; one that finds nothing costs
+        nothing). New trades wait meanwhile. Returns how many contracts are still unhedged."""
+        cap = self.cfg.live_rescue_max_loss
+        floor = tick_up(max(TICK, got[long_v].cost / got[long_v].bought - cap))
+        rounds = max(1, round(self.cfg.live_rescue_s / RESCUE_EVERY_S))
+        log.warning("live: %s %s left unhedged in %s; trying to get out for %g s", NAMES[long_v],
+                    side[long_v].upper(), mk[long_v], self.cfg.live_rescue_s)
+        x = math.floor(got[long_v].held - got[short_v].held + EPS)
+        missed = (0.0, -RESCUE_BLIND_EVERY)  # (price, round) of the last buy that found nothing
+        for n in range(1, rounds + 1):
+            if x < 1:
+                break
+            await asyncio.sleep(self.rescue_every)
+            self.guard.poll()
+            try:  # the account isn't read while a trade is under way; Kalshi's status is needed
+                await self.guard.read_exchange(self.venues["K"], schedule=False)
+            except Exception as e:
+                log.warning("live: reading Kalshi's exchange status failed: %s", e)
+            if self.guard.halted:  # stopped by hand meanwhile: the position is the user's to deal with
+                break
+            price = self._finish_at(short_v, mk[short_v], side[short_v], coef[short_v], x, unit_long, 0.0,
+                                    long_v, mk[long_v], side[long_v], coef[long_v], floor, max_loss=cap)
+            if price is not None and price <= missed[0] + EPS and n - missed[1] < RESCUE_BLIND_EVERY:
+                price = None  # that book showed this much before and the order found nothing: a sale's turn
+            if price is not None:
+                res = await self._send(t, Order(short_v, mk[short_v], side[short_v], "buy", x, price),
+                                       coef[short_v], got)
+                if res.filled < EPS:
+                    missed = (price, n)
+            elif self._open(long_v, mk[long_v]):
+                bids = self._ladder(long_v, mk[long_v], _opposite(side[long_v]))
+                bid = round(1.0 - bids[0][0], 4) if bids else None
+                if (bid is not None and bid >= floor - EPS) or n % RESCUE_BLIND_EVERY == 0:
+                    await self._sell_back(t, long_v, mk[long_v], side[long_v], coef[long_v], x, floor, unit_long, got)
+            x = math.floor(got[long_v].held - got[short_v].held + EPS)
+        if x < 1:
+            log.warning("live: the unhedged leg in %s is out", mk[long_v])
+        return max(x, 0)
 
     def _finish_at(self, short_v: str, market: str, side: str, coef: float, x: int, unit_long: float, tried: float,
-                   long_v: str, long_market: str, long_side: str, long_coef: float, floor: float) -> float | None:
+                   long_v: str, long_market: str, long_side: str, long_coef: float, floor: float,
+                   max_loss: float | None = None) -> float | None:
         """The price at which buying the ``x`` missing contracts loses less than selling
         the unhedged ones back would, by the books as they stand, or None to sell back.
-        Never more than ``live_unwind_max_loss`` a contract, the most a sale may lose."""
+        Never more than ``max_loss`` (``live_unwind_max_loss``) a contract, the most a sale may lose."""
         if not self._open(short_v, market):
             return None
         asks = self._ladder(short_v, market, side)
@@ -725,7 +785,7 @@ class LiveTrader(PaperTrader):
         bids = self._ladder(long_v, long_market, _opposite(long_side))  # an offer of the other side at p bids 1 - p
         bid = round(1.0 - bids[0][0], 4) if bids else None
         sell = math.inf if bid is None or bid < floor - EPS else unit_long - (bid - per_contract(long_coef, bid))
-        if finish > min(sell, self.cfg.live_unwind_max_loss) + EPS:
+        if finish > min(sell, self.cfg.live_unwind_max_loss if max_loss is None else max_loss) + EPS:
             return None
         if x * (price + coef / 4) > self._cash(short_v, market) - CASH_MARGIN:
             return None
@@ -871,7 +931,9 @@ async def check(cfg) -> None:
     print(f"live trading: {'ON' if cfg.live_trading else 'off'} (live_trading in config.toml)")
     print(f"limits: the venues' real balances, {100 * cfg.live_max_stake_frac:g}% of them a trade, "
           f"${cfg.live_min_profit_usd:g} expected profit, ${cfg.live_daily_loss_usd:g} daily loss, "
-          f"{cfg.live_max_trades_per_day} trades a day, sell-back floor {100 * cfg.live_unwind_max_loss:g}c under cost")
+          f"{cfg.live_max_trades_per_day} trades a day, sell-back floor {100 * cfg.live_unwind_max_loss:g}c under cost; "
+          f"a leg left unhedged is worked on for {cfg.live_rescue_s / 60:g} min at up to "
+          f"{100 * cfg.live_rescue_max_loss:g}c a contract before trading stops")
     guard = LiveGuard(cfg, {}, halt_path)
     guard.poll()
     print(f"stopped: {guard.halted}" if guard.halted else "stopped: no")

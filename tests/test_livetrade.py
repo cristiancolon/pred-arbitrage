@@ -212,6 +212,7 @@ class LiveHarness(Harness):
                             self.guard, self.journal, wake=lambda pair, delay: self.woken.append((pair, delay)),
                             check=self.check)
         trader.resolve_waits = (0.0, 0.0)
+        trader.rescue_every = 0.0
         return trader
 
     def market(self, k_yes=((0.45, 100),), k_no=((0.57, 100),), p_no=((0.50, 100),)):
@@ -308,13 +309,37 @@ def test_what_stays_unhedged_is_sold_back_no_lower_than_the_floor(tmp_path):
     assert h.guard.lost_today == pytest.approx(-t["pnl"]) and h.guard.halted is None
 
 
-def test_no_bid_at_the_floor_stops_trading_and_keeps_the_position(tmp_path):
+def on_look(h, fn):
+    """Call ``fn(n)`` as a rescue looks at the books for the ``n``th time (each round reads
+    Kalshi's exchange status first)."""
+    k = h.trader.venues["K"]
+    status, looks = k.trading_status, []
+
+    async def looked():
+        looks.append(1)
+        fn(len(looks))
+        return await status()
+    k.trading_status = looked
+    return looks
+
+
+def gone(h):
+    """The Polymarket offer is gone from the stream too."""
+    h.pbooks["p-1"] = pbook([])
+
+
+def test_no_way_out_stops_trading_and_keeps_the_position(tmp_path):
     h = LiveHarness(tmp_path, live_lead_venue="K")
-    h.market(k_no=((0.70, 100),))  # YES bid 30c: below 45c - 10c
+    h.market(k_no=((0.85, 100),))  # YES bid 15c: below 45c - 10c, and below 45c - 25c
     h.ex.book("P", "p-1", "no", [])
+    on_look(h, lambda n: gone(h))
     t = h.trade()
     assert t["status"] == "open" and (t["k_hold"], t["p_hold"]) == (10, 0)
     assert t["note"].startswith("10 contracts unhedged; stopped: 10 YES contracts left unhedged in K-1 on Kalshi")
+    assert "no way out at 25c a contract or less ($4.67 at risk)" in t["note"]
+    # The rescue tried a sale at 20c now and then; each found nothing.
+    sales = [b for v, b in h.ex.sent if b.get("reduce_only")]
+    assert [b["price"] for b in sales] == ["0.3500"] + ["0.2000"] * 5
     assert "left unhedged" in h.guard.halted and "left unhedged" in (tmp_path / livetrade.HALT_FILE).read_text()
     sent = len(h.ex.sent)
     h.market()
@@ -323,6 +348,55 @@ def test_no_bid_at_the_floor_stops_trading_and_keeps_the_position(tmp_path):
     (tmp_path / livetrade.HALT_FILE).unlink()  # arbscan live-resume
     h.guard.poll()
     assert h.guard.halted is None
+
+
+def test_a_leg_left_unhedged_is_sold_back_within_the_rescue_cap_rather_than_held(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market(k_no=((0.70, 100),))  # YES bid 30c: below 45c - 10c, above 45c - 25c
+    h.ex.book("P", "p-1", "no", [])  # gone, though the stream still shows it
+    t = h.trade()
+    assert (t["status"], t["note"], t["unwind_qty"]) == ("settled", "unwound", 10) and h.guard.halted is None
+    assert h.ex.pos[("K", "K-1")] == 0
+    # The stale offer was tried once more, then left alone while the sale got its turn.
+    buys = [b for v, b in h.ex.sent if v == "P"]
+    assert len(buys) == 2
+    # 15c a contract and the fees, counted toward today's losses at once.
+    assert t["pnl"] == pytest.approx(-(0.15 * 10 + t["k_fees"]), abs=1e-6)
+    assert h.guard.lost_today == pytest.approx(-t["pnl"])
+
+
+def test_a_leg_left_unhedged_is_hedged_when_the_other_book_comes_back(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market(k_no=((0.85, 100),))  # no bid worth selling to
+    h.ex.book("P", "p-1", "no", [])
+
+    def look(n):
+        if n == 1:
+            gone(h)
+        if n == 3:  # an offer appears
+            h.ex.book("P", "p-1", "no", [(0.60, 100)])
+            h.pbooks["p-1"] = pbook([(0.40, 100)])
+    looks = on_look(h, look)
+    t = h.trade()
+    # NO at 60c with YES at 45c: 5c a contract past break-even, plus fees; within 25c.
+    assert (t["status"], t["k_hold"], t["p_hold"], h.guard.halted) == ("open", 10, 10, None)
+    assert t["locked_profit"] == pytest.approx(10 - t["k_out"] - t["p_out"])
+    assert -0.25 * 10 < t["locked_profit"] < 0 and len(looks) == 3
+
+
+def test_a_stop_by_hand_ends_the_rescue(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market(k_no=((0.85, 100),))
+    h.ex.book("P", "p-1", "no", [])
+
+    def look(n):
+        gone(h)
+        h.guard.halt("by hand")
+    looks = on_look(h, look)
+    t = h.trade()
+    assert t["status"] == "open" and t["k_hold"] == 10 and len(looks) == 1
+    assert len(h.ex.sent) == 3  # the trade's own three orders; nothing from the rescue
+    assert h.guard.halted == "by hand"
 
 
 def test_an_order_whose_reply_is_lost_is_read_back_from_the_position(tmp_path):

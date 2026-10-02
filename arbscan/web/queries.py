@@ -231,8 +231,15 @@ def opportunities(db: sqlite3.Connection, hours: float, rules: bankroll.PickRule
 
 def settled_as(t: dict) -> str | None:
     """How a settled paper trade's two legs paid, per contract held: 'one bet' ($1 a
-    pair), 'void' (a venue settled at a price) or 'conflict' (both 0/1, disagreeing)."""
-    if t.get("status") != "settled" or not t.get("k_hold") or not t.get("p_hold"):
+    pair), 'void' (a venue settled at a price) or 'conflict' (both 0/1, disagreeing);
+    'unhedged' when it held more on one venue than the other (a leg missed and the rest
+    couldn't be sold back), so it paid on the result instead of $1 a pair."""
+    if t.get("status") != "settled" or t.get("note") == "unwound":
+        return None
+    k_hold, p_hold = t.get("k_hold") or 0.0, t.get("p_hold") or 0.0
+    if abs(k_hold - p_hold) >= 1:
+        return "unhedged"
+    if not k_hold or not p_hold:
         return None
     k, p = (t["payout_k"] or 0.0) / t["k_hold"], (t["payout_p"] or 0.0) / t["p_hold"]
     if abs(k + p - 1) < 0.001:
@@ -255,9 +262,9 @@ def paper(db: sqlite3.Connection, hours: float, table: str = "paper_trades") -> 
             r.setdefault(key, value)
         r["settled_as"] = settled_as(r)
     everything = [dict(r) for r in db.execute(
-        "SELECT ts, status, planned_size, planned_profit, k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, "
+        "SELECT ts, status, planned_size, planned_profit, k_qty, p_qty, k_hold, p_hold, k_fees, p_fees, note, "
         f"unwind_loss, locked_profit, pnl, payout_k, payout_p FROM {table} ORDER BY ts")]
-    held = [r for r in everything if settled_as(r)]
+    held = [r for r in everything if settled_as(r) not in (None, "unhedged")]  # pairs, vs $1 each
     kinds = Counter(settled_as(r) for r in held)
     traded = [r for r in everything if r["status"] != "missed"]
     curve, total = [], 0.0

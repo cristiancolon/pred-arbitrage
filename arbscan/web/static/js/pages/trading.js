@@ -144,6 +144,11 @@ function TradeStatus({ t }) {
     return html`<span title="A venue cancelled the market and settled it at a price, so the pair didn't pay exactly $1">
       <${Badge} tone="warning" icon="alert">Voided<//></span>`;
   }
+  if (t.settled_as === "unhedged") {
+    const won = t.pnl >= 0;
+    return html`<span title="One leg missed and the rest couldn't be sold back, so it paid on how the market settled instead of $1 a pair">
+      <${Badge} tone=${won ? "good" : "critical"} icon=${won ? "check" : "xcircle"}>Settled · unhedged<//></span>`;
+  }
   if (t.settled_as === "conflict") {
     return html`<span title="The two markets settled differently: the pair wasn't one bet, or a venue resolved it wrongly">
       <${Badge} tone="critical" icon="xcircle">Mismatch<//></span>`;

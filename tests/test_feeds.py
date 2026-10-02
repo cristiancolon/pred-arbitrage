@@ -252,3 +252,34 @@ def test_live_scanner_prices_on_every_update(tmp_path):
     assert row["depth_fetches"] >= 1  # evaluations in the window
     assert sc.last_sweep["n_pairs"] == 0
     sc.out.close()
+
+
+def test_a_market_left_out_of_a_reply_isnt_retired(tmp_path):
+    # 2026-10-01 06:16: a throttled metadata refresh retired ~5,000 pairs whose markets
+    # were open on both venues. Only a venue saying a market is closed retires a pair.
+    sc, _ = _live(tmp_path)
+
+    async def nothing(_):
+        return {}
+    sc.pm.markets, sc.kalshi.markets = nothing, nothing
+    asyncio.run(sc.refresh_meta(force=True))
+    assert "K-1|p-1" not in sc.finished and sc.kmeta["K-1"].status == "active"  # what we knew still stands
+
+    async def closed(slugs):
+        return {s: {"slug": s, "status": "MARKET_STATUS_RESOLVED", "closed": True} for s in slugs}
+    sc.pm.markets = closed
+    asyncio.run(sc.refresh_meta(force=True))
+    assert "K-1|p-1" in sc.finished
+    asyncio.run(sc.http.aclose())
+
+
+def test_a_kalshi_market_never_found_waits_paused_rather_than_finished(tmp_path):
+    sc, _ = _live(tmp_path)
+    del sc.kmeta["K-1"]
+
+    async def nothing(_):
+        return {}
+    sc.kalshi.markets = nothing
+    asyncio.run(sc.refresh_meta(force=True))
+    assert sc.kmeta["K-1"].status == "missing" and "K-1|p-1" not in sc.finished
+    asyncio.run(sc.http.aclose())

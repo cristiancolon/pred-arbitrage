@@ -41,7 +41,7 @@ Before any order, three things a pick must pass that paper trading doesn't ask f
   ``live_settle_s``, as well as the newer one ``paper_quiet_s``.
 - **No miss on that market just now**: a first leg that found nothing keeps the market
   out for ``COOL_S``.
-- **No sell-back in that market today**, and fewer than ``live_max_sellbacks_per_hour``
+- **No sell-back in that market in the last day**, and fewer than ``live_max_sellbacks_per_hour``
   anywhere in the last hour: the next one stops trading (a circuit breaker; on
   2026-10-01 a closed Kalshi made the old trader sell back eight trades in a row).
 - **Kalshi is trading**: its exchange status (read with the account, and no older than
@@ -97,6 +97,7 @@ CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
 PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
 STATUS_MAX_AGE_S = 90.0  # a read of Kalshi's exchange status older than this vouches for nothing
 SELLBACK_WINDOW_S = 3600.0  # the circuit breaker counts sell-backs over this long
+SELLBACK_REST_S = 86400.0  # a market that needed a sell-back is left alone this long
 ET = ZoneInfo("America/New_York")  # Kalshi's schedule is in Eastern time
 DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 CASH_MARGIN = 0.10  # leave this much of a venue's real cash unspent (fees round up)
@@ -337,11 +338,10 @@ class LiveGuard(Guard):
 
     def sold_back(self, markets, at: float | None = None, stop: bool = True) -> None:
         """A trade had to sell a leg back, or left one unhedged: its markets aren't traded
-        again today, and once ``live_max_sellbacks_per_hour`` have in an hour, trading stops."""
+        for a day, and once ``live_max_sellbacks_per_hour`` have in an hour, trading stops."""
         at = time.time() if at is None else at
-        midnight = datetime.combine(date.fromtimestamp(at), datetime.min.time()).timestamp()
         for m in markets:
-            self.cool(m, until=midnight + 86400)
+            self.cool(m, until=at + SELLBACK_REST_S)
         self.sellbacks = [t for t in self.sellbacks if t > at - SELLBACK_WINDOW_S] + [at]
         n, limit = len(self.sellbacks), self.cfg.live_max_sellbacks_per_hour
         if stop and limit and n >= limit and not self.halted:

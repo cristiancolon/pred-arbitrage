@@ -35,7 +35,9 @@ log = logging.getLogger(__name__)
 PMUS_DEFAULT_COEF = 0.0695
 MAX_DEPTH_FETCHES_PER_SWEEP = 6
 # Kalshi statuses a market never comes back from ("inactive" is only paused).
-KALSHI_FINISHED = {"closed", "determined", "finalized", "settled", "missing"}
+# Statuses Kalshi gives a market that won't trade again. A market missing from a reply
+# ("missing") isn't one of them: the pair waits, paused, until Kalshi says.
+KALSHI_FINISHED = {"closed", "determined", "finalized", "settled"}
 SERIES_FEE_TTL_S = 24 * 3600
 
 
@@ -235,6 +237,8 @@ class Scanner:
         for t in tickers:
             m = markets.get(t)
             if m is None:
+                if t in self.kmeta and self.kmeta[t].status != "missing":
+                    continue  # left out of this reply: what we knew still stands
                 self._warn_once(f"k-missing:{t}", "Kalshi market %s not found; check pairs.csv", t)
                 self.kmeta[t] = KMeta("missing", None, 0.0)
                 continue
@@ -338,8 +342,8 @@ class Scanner:
                 self._warn_once(f"p-missing:{pair.pm}", "Polymarket US market %s not found; check pairs.csv", pair.pm)
             if km is None or km.status != "active" or pm_m is None or not pm_is_open(pm_m):
                 self.episodes.close_pair(pair.id, ts)
-                if (km is not None and km.status in KALSHI_FINISHED) or pm_m is None or pm_m.get("closed") \
-                        or "RESOLVED" in (pm_m.get("status") or ""):
+                if (km is not None and km.status in KALSHI_FINISHED) or (pm_m is not None and (
+                        pm_m.get("closed") or "RESOLVED" in (pm_m.get("status") or ""))):
                     self.finished.add(pair.id)
                     newly_finished += 1
                     self._set_state(pair, ts, "finished", edges={})

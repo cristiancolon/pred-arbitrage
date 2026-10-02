@@ -128,7 +128,7 @@ class Config:
     live_lead_venue: str = "P"
     # A circuit breaker: once this many trades have had to sell a leg back (or left one
     # unhedged) within an hour, live trading stops until `arbscan live-resume`. A market
-    # that needed a sell-back isn't traded again that day.
+    # that needed a sell-back isn't traded for a day.
     live_max_sellbacks_per_hour: int = 2
     live_settle_s: float = 3.0
     # Polymarket US volume rebate on taker fees (0.10 = 10%), if you qualify.

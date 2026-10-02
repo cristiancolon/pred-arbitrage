@@ -918,13 +918,13 @@ def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp
 
 # --- the circuit breaker ----------------------------------------------------------------------
 
-def test_a_market_that_needed_a_sell_back_isnt_traded_again_today(tmp_path):
+def test_a_market_that_needed_a_sell_back_isnt_traded_for_a_day(tmp_path):
     h = LiveHarness(tmp_path, live_max_sellbacks_per_hour=0)  # (breaker off: just the market)
     h.market()
     h.ex.book("K", "K-1", "yes", [])  # Kalshi's offer is gone: Polymarket's leg is sold back
     h.ex.book("P", "p-1", "yes", [(0.52, 100)])
     t = h.trade()
-    assert t["note"] == "unwound" and h.guard.cooling["K-1"] > time.time() + 3600
+    assert t["note"] == "unwound" and h.guard.cooling["K-1"] > time.time() + 86000
     h.market()
     h.trade(window=2.0)
     assert len(h.trades()) == 1 and h.trader.stats["an order there just missed"] == 1
@@ -943,7 +943,7 @@ def test_two_sell_backs_within_an_hour_stop_trading_even_after_a_restart(tmp_pat
     # Remembered from the record after a restart (the stop file stays too).
     (tmp_path / livetrade.HALT_FILE).unlink()
     again = h.new_trader()
-    assert again.guard.sellbacks and again.guard.cooling.get("p-1", 0) > time.time() + 3600
+    assert again.guard.sellbacks and again.guard.cooling.get("p-1", 0) > time.time() + 86000
     assert again.guard.halted is None  # remembered, but a restart doesn't stop it again by itself
     assert len(again.guard.sellbacks) == 1  # (the earlier one was only in memory)
 

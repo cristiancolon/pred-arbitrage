@@ -150,7 +150,12 @@ class LiveScanner(Scanner):
             ms = await self.pm.markets(todo)
             for s in todo:
                 m = ms.get(s)
-                if m is None or m.get("closed") or "RESOLVED" in (m.get("status") or ""):
+                if m is None:
+                    # Not in the answer is not closed: a throttled or partial reply once
+                    # retired ~5,000 open pairs at a stroke (2026-10-01 06:16). Only the
+                    # venue saying so retires a pair.
+                    continue
+                if m.get("closed") or "RESOLVED" in (m.get("status") or ""):
                     self.pm_closed.add(s)
                 else:
                     self.pm_closed.discard(s)

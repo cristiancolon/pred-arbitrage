@@ -269,11 +269,11 @@ def test_paper_labels_a_settled_unhedged_trade(env):
     # Only the P leg filled and nothing bid to sell it back: it paid on the result.
     db.execute("INSERT INTO paper_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_qty, p_qty, "
                "k_hold, p_hold, k_out, p_out, locked_profit, status, payout_k, payout_p, pnl, note) VALUES "
-               "('lone', ?, 'K-1|p-1', 'K:NO+P:YES', 'no', 'yes', 8, 0, 8, 0, 8, 0, 0.21, -0.21, 'settled', 0, 8, "
-               "7.79, '8 contracts unhedged')", (NOW - 500,))
+               "('lone', ?, 'K-1|p-1', 'K:NO+P:YES', 'no', 'yes', 10, 0, 10, 0, 10, 0, 0.5, -0.5, 'settled', 0, 10, "
+               "9.5, '10 contracts unhedged')", (NOW - 500,))
     db.commit()
     data = TestClient(create_app(svc)).get("/api/paper?hours=1").json()
     assert {t["id"]: t["settled_as"] for t in data["trades"]} == {"won": "one bet", "lone": "unhedged"}
     # It isn't a pair, so it's left out of how pairs settled against $1 each; the P&L counts it.
     assert data["totals"]["results"] == pytest.approx({"effect": 0.0, "settled": 1, "void": 0, "conflict": 0})
-    assert data["totals"]["pnl"] == pytest.approx(0.4 + 7.79)
+    assert data["totals"]["pnl"] == pytest.approx(0.4 + 9.5)

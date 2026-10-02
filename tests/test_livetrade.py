@@ -417,6 +417,29 @@ def test_the_account_holds_exactly_what_the_venues_hold(tmp_path):
     assert h.trader.cash["K"] == pytest.approx(100 - t["k_out"] + 10 + 25, abs=0.01)
 
 
+def test_the_account_remembers_the_venues_real_starting_balances(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    h.trader.sync_cash()  # the first balance read, before any trade (as in LiveRun)
+    t = h.trade()
+    assert h.trader.start == {"K": pytest.approx(100.0, abs=0.01), "P": pytest.approx(100.0, abs=0.01),
+                              "ts": pytest.approx(time.time(), abs=60)}
+    # A restart keeps it, whatever the balances and records say by then.
+    h.trader = h.new_trader()
+    h.ex.cash["K"][0] = 7.0
+    asyncio.run(h.guard.read_account(h.trader.venues["K"], h.trader.venues["P"]))
+    h.trader.sync_cash()
+    assert h.trader.start["K"] == pytest.approx(100.0, abs=0.01) and h.trader.cash["K"] == pytest.approx(7.0)
+    # Worked out for the first time with trades already on record (the account predates
+    # it): the balances less what the recorded trades spent.
+    h.db.execute("DELETE FROM settings WHERE key = 'live_start'")
+    h.trader = h.new_trader()
+    h.ex.cash["K"][0] = 100.0 - t["k_out"]
+    asyncio.run(h.guard.read_account(h.trader.venues["K"], h.trader.venues["P"]))
+    h.trader.sync_cash()
+    assert t["k_out"] > 0 and h.trader.start["K"] == pytest.approx(100.0, abs=0.01)
+
+
 def test_a_restart_after_an_order_with_no_known_outcome_stays_stopped(tmp_path, capsys):
     cfg = Config(db_path=str(tmp_path / "l.db"), live_trading=True)
     from arbscan.store import connect

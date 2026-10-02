@@ -413,6 +413,11 @@ class LiveTrader(PaperTrader):
         self.last_order = {v: 0.0 for v in VENUES}
         self.rejects, self.last_reject = 0, None
         self.account_stale = True  # re-read the account before long
+        # The venues' real balances when the account started, worked out once at the first
+        # account read: each balance less what every recorded trade has spent and been paid.
+        row = db.execute("SELECT value FROM settings WHERE key = 'live_start'").fetchone()
+        self.start: dict | None = json.loads(row[0]) if row else None
+        self._modelled = row is None  # cash is still deposits plus the records' flows, not yet a balance read
         self.resolve_waits = RESOLVE_WAITS_S
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
         guard.stake_cap = lambda: self.stake_cap() or 0.0
@@ -486,6 +491,14 @@ class LiveTrader(PaperTrader):
     def sync_cash(self) -> None:
         """The account's cash is what the venues hold, once their balances are known."""
         g = self.guard
+        if self._modelled and g.shard_cash is not None and g.pm_cash is not None:
+            real = {"K": sum(g.shard_cash.values()), "P": g.pm_cash}
+            self.start = {v: round(real[v] - (self.cash[v] - self.deposits[v]), 4) for v in VENUES}
+            self.start["ts"] = time.time()
+            self.out.execute("INSERT OR REPLACE INTO settings VALUES ('live_start', ?)", (json.dumps(self.start),))
+            self.out.commit()
+            log.info("live account: started with Kalshi $%.2f + Polymarket US $%.2f", self.start["K"], self.start["P"])
+        self._modelled = False
         if g.shard_cash is not None:
             self.cash["K"] = sum(g.shard_cash.values())
         if g.pm_cash is not None:
@@ -828,7 +841,7 @@ class LiveRun:
 
     def snapshot(self) -> dict:
         g, cfg = self.guard, self.cfg
-        return {**self.trader.snapshot(), "halted": g.halted, "rejects": self.trader.rejects,
+        return {**self.trader.snapshot(), "start": self.trader.start, "halted": g.halted, "rejects": self.trader.rejects,
                 "limits": {"series": None if g.series is None else len(g.series), "held": len(g.held),
                            "shard_cash": g.shard_cash, "pm_cash": g.pm_cash, "attested_until": g.attested_until or None,
                            "lost_today": g.lost_today, "trades_today": g.trades_today,

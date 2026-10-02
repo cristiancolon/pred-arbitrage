@@ -37,6 +37,7 @@ function Hero({ data, enabled, a }) {
   const cash = a ? a.cash.K + a.cash.P : null;
   const tied = a ? a.tied.K + a.tied.P : null;
   const bankroll = a ? cash + tied : null;
+  const start = a?.start ? a.start.K + a.start.P : null;
   const pnl = a ? a.realized + a.locked : data?.totals?.pnl;
   const today = data?.today;
   return html`<section class="hero card">
@@ -46,6 +47,8 @@ function Hero({ data, enabled, a }) {
       <div class="hero-sub">
         <span><i class="sw k"></i>Cash ${money(cash)}</span>
         <span><i class="sw t"></i>In open trades ${money(tied)} <span class="muted">at cost</span></span>
+        ${start != null && html`<span title="The venues' real balances when live trading started, and the change since (open trades at cost)">
+          Started at ${money(start)} <span class=${tone(bankroll - start)}>${signed(bankroll - start)}</span></span>`}
       </div>
       ${a && bankroll > 0 && html`<div class="stack" aria-hidden="true">
         <span class="k" style=${`flex:${a.cash.K}`} title=${`Kalshi cash ${money(a.cash.K)}`}></span>

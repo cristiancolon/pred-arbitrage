@@ -452,6 +452,7 @@ class LiveTrader(PaperTrader):
         self.resolve_waits = RESOLVE_WAITS_S
         self.rescue_every = RESCUE_EVERY_S
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
+        self.paid: dict[str, set[str]] = {}  # open trade -> the venues that have already settled their leg
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
         for r in db.execute(f"SELECT ts, pair, status, settled_ts, pnl, unwind_qty, unwind_loss, locked_profit, k_hold, "
@@ -862,9 +863,28 @@ class LiveTrader(PaperTrader):
         n = super().settle(lookup, finished)
         for tid, t in before.items():
             if tid not in self.open:
+                for v in self.paid.pop(tid, ()):  # (already out of ``tied``: settling took it out again)
+                    self.tied[v] += t[f"{v.lower()}_out"] or 0.0
                 self.guard.record_pnl((t["pnl"] or 0.0) + early_loss(t))  # what wasn't counted already
-        if n:
+        if self._paid_legs(lookup) or n:
             self.account_stale = True  # read what the venues actually paid out
+        return n
+
+    def _paid_legs(self, lookup) -> int:
+        """A leg whose venue has settled it is paid out, into the venue's cash, even while
+        the other venue hasn't settled its own: it stops counting as money in open trades,
+        or the account counts it twice (on 2026-10-03 Polymarket US paid $29 on two boxing
+        trades hours before Kalshi settled them, and the bankroll read $30 high). Returns
+        how many legs were newly found paid."""
+        want = [(tid, v, m) for tid, t in self.open.items()
+                for v, m in zip(VENUES, t["pair"].split("|", 1)) if v not in self.paid.get(tid, ())]
+        values = lookup({(v, m) for _, v, m in want}) if want else {}
+        n = 0
+        for tid, v, m in want:
+            if (v, m) in values:
+                self.tied[v] -= self.open[tid][f"{v.lower()}_out"] or 0.0
+                self.paid.setdefault(tid, set()).add(v)
+                n += 1
         return n
 
 

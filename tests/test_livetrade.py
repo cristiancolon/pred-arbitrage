@@ -504,6 +504,23 @@ def test_settling_counts_toward_todays_losses(tmp_path):
     assert h.guard.lost_today == pytest.approx(t["k_out"] + t["p_out"])
 
 
+def test_a_leg_one_venue_has_paid_out_isnt_counted_twice(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    t = h.trade()
+    tied = dict(h.trader.tied)
+    # Polymarket has settled its leg (the payout is in its cash); Kalshi hasn't yet.
+    assert h.trader.settle(lambda keys: {k: 1.0 for k in keys if k == ("P", "p-1")}, set()) == 0
+    assert h.trader.tied["P"] == pytest.approx(tied["P"] - t["p_out"]) and h.trader.tied["K"] == tied["K"]
+    assert h.trader.account_stale and len(h.trader.open) == 1
+    h.trader.settle(lambda keys: {k: 1.0 for k in keys if k == ("P", "p-1")}, set())  # (not twice)
+    assert h.trader.tied["P"] == pytest.approx(tied["P"] - t["p_out"])
+    # Then Kalshi settles too, and the trade is done.
+    assert h.trader.settle(lambda keys: {("K", "K-1"): 0.0, ("P", "p-1"): 1.0}, {PAIR.id}) == 1
+    assert h.trader.tied == pytest.approx({"K": tied["K"] - t["k_out"], "P": tied["P"] - t["p_out"]})
+    assert not h.trader.paid
+
+
 def test_the_account_holds_exactly_what_the_venues_hold(tmp_path):
     h = LiveHarness(tmp_path, live_lead_venue="K")
     h.market()

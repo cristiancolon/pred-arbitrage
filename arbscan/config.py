@@ -117,9 +117,14 @@ class Config:
     # A leg still unhedged after that isn't left for the user: for live_rescue_s the trader
     # keeps watching both books and gets out the cheaper way as soon as it can, the missing
     # leg bought or the extra one sold back, at a loss of up to live_rescue_max_loss a
-    # contract. Only then does trading stop with the position held.
+    # contract. Only then does trading stop with the position held. For its first
+    # live_rescue_patience_s it asks no more than live_unwind_max_loss a contract (an offer
+    # pulled for a few seconds tends to come back), unless the leg cost more than
+    # live_rescue_patience_usd: that much at risk is got out of at once.
     live_rescue_s: float = 300.0
     live_rescue_max_loss: float = 0.25
+    live_rescue_patience_s: float = 60.0
+    live_rescue_patience_usd: float = 10.0
     # Move the live account's Kalshi cash between exchange shards to where its trades
     # are (shards.py): each shard in use keeps at least a full trade's worth, the rest
     # follows the last few days' demand, and an unused shard is emptied.

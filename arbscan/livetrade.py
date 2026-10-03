@@ -62,7 +62,11 @@ database) before it's sent and again once its outcome is known, and kept in
 
 **A leg still unhedged** after that is worked on for ``live_rescue_s``: both books
 are watched and it's got out the cheaper way as soon as either allows, at a loss of up
-to ``live_rescue_max_loss`` a contract. No new trade starts meanwhile.
+to ``live_rescue_max_loss`` a contract. For the first ``live_rescue_patience_s`` the
+loss allowed stays at ``live_unwind_max_loss``: on 2026-10-02 a Kalshi offer pulled
+for 20 s came back at 49c, after Polymarket's leg had been sold back at 23c (cost 48c).
+A leg that cost more than ``live_rescue_patience_usd`` doesn't wait. No new trade
+starts meanwhile.
 
 **Stopping.** The trader stops itself by writing ``live.halt`` next to the database,
 with the reason, when a position is left unhedged even so, when an order's outcome can't be
@@ -750,16 +754,22 @@ class LiveTrader(PaperTrader):
         a loss of up to ``live_rescue_max_loss`` a contract. A sell-back is also tried now
         and then with no bid shown (a stream can lag the book; one that finds nothing costs
         nothing). New trades wait meanwhile. Returns how many contracts are still unhedged."""
-        cap = self.cfg.live_rescue_max_loss
-        floor = tick_up(max(TICK, got[long_v].cost / got[long_v].bought - cap))
-        rounds = max(1, round(self.cfg.live_rescue_s / RESCUE_EVERY_S))
-        log.warning("live: %s %s left unhedged in %s; trying to get out for %g s", NAMES[long_v],
-                    side[long_v].upper(), mk[long_v], self.cfg.live_rescue_s)
+        cfg = self.cfg
+        rounds = max(1, round(cfg.live_rescue_s / RESCUE_EVERY_S))
         x = math.floor(got[long_v].held - got[short_v].held + EPS)
+        # A cheap leg first waits a while for the other book to come back near its price.
+        patient = x * unit_long <= cfg.live_rescue_patience_usd
+        wait = round(cfg.live_rescue_patience_s / RESCUE_EVERY_S) if patient else 0
+        log.warning("live: %s %s left unhedged in %s ($%.2f); trying to get out for %g s%s", NAMES[long_v],
+                    side[long_v].upper(), mk[long_v], x * unit_long, cfg.live_rescue_s,
+                    f", the first {cfg.live_rescue_patience_s:g} s at no more than "
+                    f"{100 * cfg.live_unwind_max_loss:g}c a contract" if wait else "")
         missed = (0.0, -RESCUE_BLIND_EVERY)  # (price, round) of the last buy that found nothing
         for n in range(1, rounds + 1):
             if x < 1:
                 break
+            cap = min(cfg.live_unwind_max_loss, cfg.live_rescue_max_loss) if n <= wait else cfg.live_rescue_max_loss
+            floor = tick_up(max(TICK, got[long_v].cost / got[long_v].bought - cap))
             await asyncio.sleep(self.rescue_every)
             self.guard.poll()
             try:  # the account isn't read while a trade is under way; Kalshi's status is needed

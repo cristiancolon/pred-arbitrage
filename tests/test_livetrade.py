@@ -337,9 +337,9 @@ def test_no_way_out_stops_trading_and_keeps_the_position(tmp_path):
     assert t["status"] == "open" and (t["k_hold"], t["p_hold"]) == (10, 0)
     assert t["note"].startswith("10 contracts unhedged; stopped: 10 YES contracts left unhedged in K-1 on Kalshi")
     assert "no way out at 25c a contract or less ($4.67 at risk)" in t["note"]
-    # The rescue tried a sale at 20c now and then; each found nothing.
+    # The rescue tried a sale now and then, at 35c for its first minute, then 20c; each found nothing.
     sales = [b for v, b in h.ex.sent if b.get("reduce_only")]
-    assert [b["price"] for b in sales] == ["0.3500"] + ["0.2000"] * 5
+    assert [b["price"] for b in sales] == ["0.3500"] * 2 + ["0.2000"] * 4
     assert "left unhedged" in h.guard.halted and "left unhedged" in (tmp_path / livetrade.HALT_FILE).read_text()
     sent = len(h.ex.sent)
     h.market()
@@ -353,13 +353,17 @@ def test_no_way_out_stops_trading_and_keeps_the_position(tmp_path):
 def test_a_leg_left_unhedged_is_sold_back_within_the_rescue_cap_rather_than_held(tmp_path):
     h = LiveHarness(tmp_path, live_lead_venue="K")
     h.market(k_no=((0.70, 100),))  # YES bid 30c: below 45c - 10c, above 45c - 25c
+    h.kbooks["K-1"] = kbook({0.55: 100}, {0.30: 100})  # the stream shows the 30c bid too
     h.ex.book("P", "p-1", "no", [])  # gone, though the stream still shows it
+    looks = on_look(h, lambda n: None)
     t = h.trade()
     assert (t["status"], t["note"], t["unwind_qty"]) == ("settled", "unwound", 10) and h.guard.halted is None
     assert h.ex.pos[("K", "K-1")] == 0
-    # The stale offer was tried once more, then left alone while the sale got its turn.
+    # Not sold for the first minute (12 looks); the stale offer was tried now and then meanwhile,
+    # and had its turn again on the 13th.
+    assert len(looks) == 14
     buys = [b for v, b in h.ex.sent if v == "P"]
-    assert len(buys) == 2
+    assert len(buys) == 3
     # 15c a contract and the fees, counted toward today's losses at once.
     assert t["pnl"] == pytest.approx(-(0.15 * 10 + t["k_fees"]), abs=1e-6)
     assert h.guard.lost_today == pytest.approx(-t["pnl"])
@@ -382,6 +386,36 @@ def test_a_leg_left_unhedged_is_hedged_when_the_other_book_comes_back(tmp_path):
     assert (t["status"], t["k_hold"], t["p_hold"], h.guard.halted) == ("open", 10, 10, None)
     assert t["locked_profit"] == pytest.approx(10 - t["k_out"] - t["p_out"])
     assert -0.25 * 10 < t["locked_profit"] < 0 and len(looks) == 3
+
+
+def test_a_cheap_leg_waits_a_minute_for_the_other_book_rather_than_sell_at_a_big_loss(tmp_path):
+    # 2026-10-02: Kalshi's offer was pulled for 20 s; the leg was sold back 25c under cost meanwhile.
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market(k_no=((0.70, 100),))  # YES bid 30c: 15c under cost, within 25c but not 10c
+    h.kbooks["K-1"] = kbook({0.55: 100}, {0.30: 100})
+
+    def look(n):
+        if n == 1:
+            gone(h)
+        if n == 4:  # 20 s on, the offer is back
+            h.ex.book("P", "p-1", "no", [(0.50, 100)])
+            h.pbooks["p-1"] = pbook([(0.50, 100)])
+    h.ex.book("P", "p-1", "no", [])
+    looks = on_look(h, look)
+    t = h.trade()
+    assert (t["status"], t["k_hold"], t["p_hold"], t["unwind_qty"]) == ("open", 10, 10, 0) and len(looks) == 4
+    # Only the trade's own try at 10c under cost; the 30c bid wasn't taken.
+    assert [b["price"] for v, b in h.ex.sent if b.get("reduce_only")] == ["0.3500"]
+
+
+def test_an_expensive_leg_is_got_out_of_at_once(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K", live_rescue_patience_usd=4.0)  # the leg cost $4.67
+    h.market(k_no=((0.70, 100),))
+    h.kbooks["K-1"] = kbook({0.55: 100}, {0.30: 100})
+    h.ex.book("P", "p-1", "no", [])
+    looks = on_look(h, lambda n: gone(h))
+    t = h.trade()
+    assert (t["note"], t["unwind_qty"], len(looks)) == ("unwound", 10, 1)
 
 
 def test_a_stop_by_hand_ends_the_rescue(tmp_path):

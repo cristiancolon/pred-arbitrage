@@ -49,6 +49,12 @@ Before any order, three things a pick must pass that paper trading doesn't ask f
   shard takes orders, its published hours don't close it within ``CLOSE_MARGIN_S``
   (every Thursday 03:00-05:00 ET), and no order was just turned away as paused. Its
   books stay up while it's closed, so the scanner goes on seeing windows there.
+- **The game hasn't started**: no trade from ``START_MARGIN_S`` before its scheduled
+  start on (Kalshi's ticker time or Polymarket's ``gameStartTime``, whichever is
+  earlier: the latter follows reschedules). In play, quotes are pulled for seconds at a
+  time and the spread widens: on 2026-10-02 a darts match's Kalshi offer vanished
+  between the two legs and Polymarket's leg was sold back 25c under cost. A market
+  with no start time (a golf tournament, a season future) isn't held to this.
 
 Every order is written to a journal file (``live_journal.jsonl`` next to the
 database) before it's sent and again once its outcome is known, and kept in
@@ -77,6 +83,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import confirm
+from .catalog import kalshi_start_ts
 from .dryrun import SERIES_SQL, Guard, clean_series
 from .fees import order_fee, per_contract
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
@@ -100,6 +107,7 @@ RESCUE_EVERY_S = 5.0  # a leg left unhedged: how often the books are looked at a
 RESCUE_BLIND_EVERY = 12  # ... and every this many looks, a sell-back is tried even with no bid shown
 SCHEDULE_EVERY_S = 3600.0  # re-read Kalshi's trading hours
 CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
+START_MARGIN_S = 120.0  # ... nor this close to (or after) a game's scheduled start
 PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
 STATUS_MAX_AGE_S = 90.0  # a read of Kalshi's exchange status older than this vouches for nothing
 SELLBACK_WINDOW_S = 3600.0  # the circuit breaker counts sell-backs over this long
@@ -277,6 +285,7 @@ class LiveGuard(Guard):
         self.sellbacks: list[float] = []  # when trades had to sell a leg back (or left one unhedged)
         self.k_schedule: dict | None = None
         self.k_paused_until = 0.0
+        self.starts: dict[str, float] = {}  # Polymarket slug -> its game's scheduled start
 
     def __call__(self, pair, days) -> str | None:
         if self.halted:
@@ -290,6 +299,8 @@ class LiveGuard(Guard):
             return "feed not fresh"
         if self.kalshi_closed(pair.kalshi):
             return "Kalshi trading paused"
+        if self.started(pair):
+            return "game under way"
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         why = super().__call__(pair, days)
@@ -316,6 +327,11 @@ class LiveGuard(Guard):
             return True
         return False
 
+    def started(self, pair) -> bool:
+        """The pair's game is under way, or about to be (see the module docstring)."""
+        known = [t for t in (kalshi_start_ts(pair.kalshi), self.starts.get(pair.pm)) if t]
+        return bool(known) and time.time() >= min(known) - START_MARGIN_S
+
     def kalshi_paused(self) -> None:
         """An order was just turned away for paused trading."""
         self.k_paused_until = time.time() + PAUSED_S
@@ -332,6 +348,8 @@ class LiveGuard(Guard):
             return "halted"
         if self.kalshi_closed(pair.kalshi):
             return "Kalshi trading paused"
+        if self.started(pair):
+            return "game under way"
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         return Guard.__call__(self, pair, days)
@@ -364,11 +382,14 @@ class LiveGuard(Guard):
         self.lost_today = max(0.0, -self.pnl_today)
 
     def read_records(self, db_path: str, table: str) -> None:
-        """The series' settlement records. Today's losses are counted as they happen."""
+        """The series' settlement records and the games' start times. Today's losses are
+        counted as they happen."""
         db = open_db(db_path)
         try:
             self.series = clean_series(db.execute(SERIES_SQL).fetchall(), self.cfg.live_series_min_settled,
                                        self.cfg.live_series_max_void)
+            self.starts = dict(db.execute(
+                "SELECT id, start_ts FROM markets WHERE venue = 'P' AND start_ts IS NOT NULL").fetchall())
         finally:
             db.close()
 

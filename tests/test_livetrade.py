@@ -994,6 +994,22 @@ def test_nothing_is_traded_while_kalshi_is_closed_or_about_to_close(tmp_path):
         assert h.guard.kalshi_closed("K-1")
 
 
+def test_nothing_is_traded_once_the_game_is_under_way_or_about_to_be(tmp_path):
+    h = LiveHarness(tmp_path)
+    h.market()
+    h.db.execute("INSERT INTO markets (venue, id, start_ts) VALUES ('P', 'p-1', ?)", (time.time() + 60,))
+    h.db.commit()
+    h.guard.read_records(h.cfg.db_path, "live_trades")
+    h.guard.series = {"K"}  # (the test database has no settled series)
+    assert h.trade() is None and not h.ex.sent and h.trader.stats["game under way"] == 1
+    h.guard.starts["p-1"] = time.time() + 3600  # moved back an hour
+    assert h.trade(window=2.0)["status"] == "open"
+    # Kalshi's ticker carries the original start: the earlier of the two counts.
+    darts = replace(PAIR, kalshi="KXDARTSMATCH-26OCT021820RSZAGHAY-RSZA")
+    assert h.guard.started(darts) and h.guard.passing(darts, 1.0) == "game under way"
+    assert not h.guard.started(replace(PAIR, pm="p-2"))  # no start time known: not held to it
+
+
 @pytest.mark.parametrize("reply", ["paused", "exchange_is_paused"])
 def test_an_order_turned_away_as_paused_leaves_kalshi_alone_without_stopping(tmp_path, reply):
     h = LiveHarness(tmp_path)

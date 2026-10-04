@@ -22,7 +22,9 @@ holds, and nothing near the Kalshi location check lapsing. On top of those:
 
 A trade sends the Polymarket US leg first (``live_lead_venue``) at the planned limit:
 its books are thin and its stream can't be checked for gaps, so it is the leg that
-misses, and a first leg that misses costs nothing. Kalshi's leg follows for what that
+misses, and a first leg that misses costs nothing. It is fill-or-kill: all of it or none,
+since a part fill can leave a fraction of a contract Kalshi can't hedge (on 2026-10-03
+25.56 of 26 filled, and 0.56 rode unhedged). Kalshi's leg follows for what that
 filled, at up to break-even against what it really cost (the order fills at the book's
 prices, so the higher limit only matters if the planned price has gone). Anything still
 unhedged is got out of the cheaper way, by the books as they stand: the missing
@@ -562,8 +564,10 @@ class LiveTrader(PaperTrader):
         stopped = None
         try:
             try:
+                # Polymarket's leg is all or nothing: a part fill can leave a fraction of a
+                # contract that Kalshi, which trades whole ones, can't hedge.
                 first = await self._send(t, Order(lead, mk[lead], side[lead], "buy", t["planned_size"],
-                                                  limits[lead]), coef[lead], got)
+                                                  limits[lead], all_or_none=lead == "P"), coef[lead], got)
                 if got[lead].held >= 1:
                     # The other leg for what the first filled, at up to break-even: it
                     # fills at the book's prices, so the cap only matters if the planned

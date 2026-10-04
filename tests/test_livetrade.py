@@ -37,7 +37,9 @@ class Exchange:
     """Kalshi and Polymarket US behind one mock transport, each with books, positions
     and cash. An immediate-or-cancel order fills against the book at its limit or
     better and takes what it fills. ``script[venue]`` makes the next orders there time
-    out after filling ("timeout"), fail with a 500 ("500"), or be rejected ("reject")."""
+    out after filling ("timeout"), fail with a 500 ("500"), or be rejected ("reject"). A
+    Polymarket fill-or-kill order the book can't fill whole fills nothing and is cancelled,
+    or rejected for no liquidity after a "kill-reject" script."""
 
     def __init__(self):
         self.asks: dict[tuple[str, str, str], list] = {}  # (venue, market, side) -> [(price, qty)]
@@ -52,9 +54,16 @@ class Exchange:
         self.k_trading = True
         self.on_order = None  # called with (venue, body) as each order arrives
         self.book_time = "2026-09-28T12:00:00Z"  # when the Polymarket books last changed
+        self.killed = "cancel"  # how a Polymarket fill-or-kill order that can't fill whole is turned away
 
     def book(self, venue, market, side, levels):
         self.asks[(venue, market, side)] = sorted(levels)
+
+    def _room(self, venue, market, side, action, limit):
+        """How much an order at ``limit`` could fill now."""
+        key = (venue, market, side if action == "buy" else ("no" if side == "yes" else "yes"))
+        return sum(q for p, q in self.asks.get(key, [])
+                   if (p <= limit + 1e-9 if action == "buy" else round(1 - p, 4) >= limit - 1e-9))
 
     def _fill(self, venue, market, side, action, qty, limit):
         """Contracts of ``side`` bought at ``limit`` or less, or sold at ``limit`` or more
@@ -165,6 +174,16 @@ class Exchange:
         side = "yes" if b["intent"].endswith("LONG") else "no"
         action = "buy" if "_BUY_" in b["intent"] else "sell"
         yes, qty = float(b["price"]["value"]), float(b["quantity"])
+        limit = round(yes if side == "yes" else 1 - yes, 4)
+        if b["tif"] == "TIME_IN_FORCE_FILL_OR_KILL" and self._room("P", b["marketSlug"], side, action, limit) < qty - 1e-9:
+            stamp = "2026-09-28T12:00:00.100Z"
+            if self.killed == "reject":
+                return httpx.Response(200, json={"id": f"p{len(self.sent)}", "executions": [
+                    {"type": "EXECUTION_TYPE_REJECTED", "orderRejectReason": "ORD_REJECT_REASON_NO_LIQUIDITY",
+                     "transactTime": stamp, "order": {"state": "ORDER_STATE_REJECTED", "cumQuantity": 0}}]})
+            return httpx.Response(200, json={"id": f"p{len(self.sent)}", "executions": [
+                {"type": "EXECUTION_TYPE_CANCELED", "transactTime": stamp,
+                 "order": {"state": "ORDER_STATE_CANCELED", "cumQuantity": 0}}]})
         n, avg, fee = self._fill("P", b["marketSlug"], side, action, qty, round(yes if side == "yes" else 1 - yes, 4))
         done = n >= qty - 1e-9
         stamp = "2026-09-28T12:00:00.100Z"
@@ -657,10 +676,9 @@ def test_polymarket_goes_first_and_kalshi_follows_for_what_it_filled(tmp_path):
     h = LiveHarness(tmp_path)
     assert h.cfg.live_lead_venue == "P"
     h.market()
-    h.ex.book("P", "p-1", "no", [(0.50, 6)])  # someone took 4 of the 10 the book showed
     t = h.trade()
-    assert [v for v, _ in h.ex.sent] == ["P", "K"] and h.ex.sent[1][1]["count"] == "6.00"
-    assert (t["status"], t["k_hold"], t["p_hold"], t["unwind_qty"]) == ("open", 6, 6, 0)  # smaller, nothing sold back
+    assert [v for v, _ in h.ex.sent] == ["P", "K"] and h.ex.sent[1][1]["count"] == "10.00"
+    assert (t["status"], t["k_hold"], t["p_hold"], t["unwind_qty"]) == ("open", 10, 10, 0)
     assert t["locked_profit"] > 0 and h.guard.lost_today == 0
 
 
@@ -670,7 +688,7 @@ def test_a_first_leg_that_finds_nothing_costs_nothing_and_rests_the_market(tmp_p
     h.ex.book("P", "p-1", "no", [])  # the offer the scanner still shows is gone
     t = h.trade()
     assert (t["status"], t["note"], t["pnl"]) == ("missed", "no fill", 0) and [v for v, _ in h.ex.sent] == ["P"]
-    assert h.guard.lost_today == 0 and h.guard.halted is None and h.ex.pos == {("P", "p-1"): 0}
+    assert h.guard.lost_today == 0 and h.guard.halted is None and not h.ex.pos.get(("P", "p-1"))
     # Its book showed what wasn't there: no second order into it for a minute.
     h.market()
     h.trade(window=2.0)
@@ -682,6 +700,31 @@ def test_a_first_leg_that_finds_nothing_costs_nothing_and_rests_the_market(tmp_p
     h.trader.watch[key].due = 0.0
     t = h.trade(window=2.0)
     assert t["status"] == "open" and t["k_hold"] == t["p_hold"] == t["planned_size"]
+
+
+@pytest.mark.parametrize("killed", ["cancel", "reject"])
+def test_polymarket_fills_all_or_nothing_so_no_fraction_is_left_unhedged(tmp_path, killed):
+    # 2026-10-03: 25.56 of 26 filled; Kalshi, whole contracts only, hedged 25.
+    h = LiveHarness(tmp_path)
+    h.ex.killed = killed
+    h.market()
+    h.ex.book("P", "p-1", "no", [(0.50, 9.56)])  # less than the 10 the trade asks for
+    t = h.trade()
+    assert h.ex.sent[0][1]["tif"] == "TIME_IN_FORCE_FILL_OR_KILL" and [v for v, _ in h.ex.sent] == ["P"]
+    assert (t["status"], t["note"], t["pnl"]) == ("missed", "no fill", 0) and h.ex.pos[("P", "p-1")] == 0
+    # A kill is a miss, not a rejection: it never adds up to a stop.
+    assert h.trader.rejects == 0 and h.guard.halted is None and h.guard.cooling.get("p-1", 0) > time.time()
+    assert h.orders()[0]["status"] == "none" and h.orders()[0]["error"] is None
+
+
+def test_only_polymarkets_first_leg_is_all_or_nothing(tmp_path):
+    h = LiveHarness(tmp_path)
+    h.market()
+    h.ex.book("K", "K-1", "yes", [(0.45, 6)])  # Kalshi fills 6 of 10: the rest is sold back, part fills welcome
+    h.ex.book("P", "p-1", "yes", [(0.52, 100)])
+    h.trade()
+    tifs = [b.get("tif") for v, b in h.ex.sent if v == "P"]
+    assert tifs[0] == "TIME_IN_FORCE_FILL_OR_KILL" and set(tifs[1:]) == {"TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"}
 
 
 def test_the_kalshi_leg_pays_up_to_break_even_rather_than_sell_polymarket_back(tmp_path):
@@ -944,22 +987,16 @@ def test_a_second_leg_that_never_reached_the_book_is_tried_again(tmp_path):
     assert (t["k_hold"], t["p_hold"], t["unwind_qty"]) == (10, 10, 0)
 
 
-def test_part_of_a_contract_left_over_is_held_and_said(tmp_path):
-    h = LiveHarness(tmp_path)
-    h.market()
-    h.ex.book("P", "p-1", "no", [(0.50, 3.4)])  # Polymarket fills parts of contracts
-    t = h.trade()
-    assert h.ex.sent[1][1]["count"] == "3.00"  # Kalshi's leg is whole contracts
-    assert (t["status"], t["k_hold"], t["p_hold"]) == ("open", 3, pytest.approx(3.4))
-    assert t["note"] == "0.4 contracts unhedged" and len(h.ex.sent) == 2 and h.guard.halted is None
-
-    h = LiveHarness(tmp_path / "b")
-    h.market()
-    h.ex.book("P", "p-1", "no", [(0.50, 0.4)])
-    t = h.trade()
-    # Less than a contract and nothing against it: still a position, kept open until it settles.
-    assert (t["status"], t["k_hold"], t["p_hold"], t["note"]) == ("open", 0, pytest.approx(0.4), "0.4 contracts unhedged")
-    assert len(h.ex.sent) == 1 and h.trader.open
+def test_no_part_of_a_contract_is_left_over(tmp_path):
+    # Polymarket fills parts of contracts and Kalshi only whole ones: an all-or-nothing
+    # first leg never leaves a part Kalshi can't hedge (it used to: 3 hedged, 0.4 held).
+    for n, book in enumerate((3.4, 0.4)):
+        h = LiveHarness(tmp_path / str(n))
+        h.market()
+        h.ex.book("P", "p-1", "no", [(0.50, book)])
+        t = h.trade()
+        assert (t["status"], t["k_hold"], t["p_hold"], t["note"]) == ("missed", 0, 0, "no fill")
+        assert len(h.ex.sent) == 1 and not h.trader.open and h.guard.halted is None
 
 
 def test_waiting_on_a_check_asks_once_not_on_every_update(tmp_path):

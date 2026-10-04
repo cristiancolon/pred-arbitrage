@@ -50,6 +50,7 @@ class Order:
     qty: float  # contracts
     limit: float  # the worst price accepted for `side` (a NO price for NO)
     reduce_only: bool = False  # Kalshi: never trade more than the position held
+    all_or_none: bool = False  # Polymarket US: fill the whole quantity or nothing (fill-or-kill)
     client_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
@@ -268,6 +269,14 @@ class KalshiTrading(_Venue):
         return (await self._get(f"/markets/{ticker}")).get("market") or {}
 
 
+def killed(reason: str | None) -> bool:
+    """A fill-or-kill order turned away because the book didn't hold all of it. Polymarket
+    US's docs don't say how a kill is reported: as a cancel (``none`` either way) or as a
+    rejection, presumably ``ORD_REJECT_REASON_NO_LIQUIDITY``. Any other rejection is a
+    real one, and enough of them in a row still stop trading."""
+    return bool(reason) and any(w in reason.upper() for w in ("LIQUIDITY", "FILL_OR_KILL", "KILL", "FOK"))
+
+
 class PMTrading(_Venue):
     """Polymarket US's trading API: orders, order preview, balance and positions."""
 
@@ -275,7 +284,8 @@ class PMTrading(_Venue):
     def body(o: Order) -> dict:
         return {"marketSlug": o.market, "type": "ORDER_TYPE_LIMIT",
                 "price": {"value": _decimal(o.yes_price), "currency": "USD"}, "quantity": o.qty,
-                "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", "intent": PM_INTENT[(o.side, o.action)],
+                "tif": "TIME_IN_FORCE_FILL_OR_KILL" if o.all_or_none else "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                "intent": PM_INTENT[(o.side, o.action)],
                 "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
                 "synchronousExecution": True, "maxBlockTime": str(PM_BLOCK_S)}
 
@@ -326,7 +336,9 @@ class PMTrading(_Venue):
         res.filled, res.fees = shares, fees
         if shares > EPS and notional > 0:
             res.avg_price = _side_price(o.side, notional / shares)  # quoted as YES
-        if order.get("state") == "ORDER_STATE_REJECTED" or (res.error is not None and shares <= EPS):
+        if o.all_or_none and shares <= EPS and killed(res.error):
+            res.status, res.error = "none", None  # not all of it was there: killed, as asked
+        elif order.get("state") == "ORDER_STATE_REJECTED" or (res.error is not None and shares <= EPS):
             res.status, res.error = "rejected", res.error or "rejected"
         elif order.get("state") in PM_DONE:
             res.status = status_of(shares, o.qty)

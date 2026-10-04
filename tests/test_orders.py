@@ -244,3 +244,22 @@ def test_record_keeps_the_request_and_reply(tmp_path):
     assert (r["id"], r["mode"], r["venue"], r["side"], r["limit_price"]) == ("c1", "test", "P", "no", 0.08)
     assert r["status"] == "filled"
     assert json.loads(r["body"])["intent"] == "ORDER_INTENT_BUY_SHORT" and json.loads(r["reply"]) == {"id": "x"}
+
+
+def test_an_all_or_none_order_is_fill_or_kill_and_a_kill_is_no_fill():
+    o = Order("P", "s", "no", "buy", 10, 0.5, all_or_none=True)
+    assert PMTrading.body(o)["tif"] == "TIME_IN_FORCE_FILL_OR_KILL"
+
+    def reply(reason):
+        return {"id": "x", "executions": [{"type": "EXECUTION_TYPE_REJECTED", "orderRejectReason": reason,
+                                           "order": {"state": "ORDER_STATE_REJECTED", "cumQuantity": 0}}]}
+    res = PMTrading.parse(o, reply("ORD_REJECT_REASON_NO_LIQUIDITY"), Result(o, "unknown"))
+    assert (res.status, res.filled, res.error) == ("none", 0, None)
+    cancel = {"id": "x", "executions": [{"type": "EXECUTION_TYPE_CANCELED", "order": {"state": "ORDER_STATE_CANCELED"}}]}
+    assert PMTrading.parse(o, cancel, Result(o, "unknown")).status == "none"
+    # Any other rejection is still one (and enough in a row stop trading).
+    res = PMTrading.parse(o, reply("ORD_REJECT_REASON_INCORRECT_QUANTITY"), Result(o, "unknown"))
+    assert (res.status, res.error) == ("rejected", "ORD_REJECT_REASON_INCORRECT_QUANTITY")
+    # An ordinary order rejected for liquidity is a rejection as before.
+    plain = Order("P", "s", "no", "buy", 10, 0.5)
+    assert PMTrading.parse(plain, reply("ORD_REJECT_REASON_NO_LIQUIDITY"), Result(plain, "unknown")).status == "rejected"

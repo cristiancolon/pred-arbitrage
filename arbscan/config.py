@@ -125,6 +125,11 @@ class Config:
     live_rescue_max_loss: float = 0.25
     live_rescue_patience_s: float = 60.0
     live_rescue_patience_usd: float = 10.0
+    # In play (from START_SETTLE_S after a game's scheduled start; nothing is traded from
+    # START_MARGIN_S before it until then), a trade's legs cost at most
+    # live_in_play_stake_usd each: no more than live_rescue_patience_usd, so a leg left
+    # unhedged there is the kind the rescue waits for.
+    live_in_play_stake_usd: float = 10.0
     # Move the live account's Kalshi cash between exchange shards to where its trades
     # are (shards.py): each shard in use keeps at least a full trade's worth, the rest
     # follows the last few days' demand, and an unused shard is emptied.

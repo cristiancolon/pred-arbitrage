@@ -51,12 +51,18 @@ Before any order, three things a pick must pass that paper trading doesn't ask f
   shard takes orders, its published hours don't close it within ``CLOSE_MARGIN_S``
   (every Thursday 03:00-05:00 ET), and no order was just turned away as paused. Its
   books stay up while it's closed, so the scanner goes on seeing windows there.
-- **The game hasn't started**: no trade from ``START_MARGIN_S`` before its scheduled
-  start on (Kalshi's ticker time or Polymarket's ``gameStartTime``, whichever is
-  earlier: the latter follows reschedules). In play, quotes are pulled for seconds at a
-  time and the spread widens: on 2026-10-02 a darts match's Kalshi offer vanished
-  between the two legs and Polymarket's leg was sold back 25c under cost. A market
-  with no start time (a golf tournament, a season future) isn't held to this.
+- **Not around the start, and small in play**: no trade from ``START_MARGIN_S`` before a
+  game's scheduled start (Kalshi's ticker time or Polymarket's ``gameStartTime``,
+  whichever is earlier: the latter follows reschedules) until ``START_SETTLE_S`` after
+  it, when quotes are pulled most: on 2026-10-02 two darts trades two minutes in each
+  lost a leg (a Kalshi offer vanished between the legs, and Polymarket's leg was sold
+  back 25c under cost). Later in play a trade's legs cost at most
+  ``live_in_play_stake_usd`` each, so a leg left unhedged is the cheap kind the rescue
+  waits for (a pulled Kalshi offer is usually back within a minute; Polymarket's book
+  can empty), and no market resolving within ``IN_PLAY_MIN_RESOLVE_S`` is traded, since
+  the rescue would outlive it. Of the 17 live trades made in play before 10-03, 15
+  filled cleanly. A market with no start time (a golf tournament, a season future,
+  tennis) isn't held to any of this.
 
 Every order is written to a journal file (``live_journal.jsonl`` next to the
 database) before it's sent and again once its outcome is known, and kept in
@@ -113,7 +119,9 @@ RESCUE_EVERY_S = 5.0  # a leg left unhedged: how often the books are looked at a
 RESCUE_BLIND_EVERY = 12  # ... and every this many looks, a sell-back is tried even with no bid shown
 SCHEDULE_EVERY_S = 3600.0  # re-read Kalshi's trading hours
 CLOSE_MARGIN_S = 120.0  # no trade starts this close to Kalshi's scheduled close
-START_MARGIN_S = 120.0  # ... nor this close to (or after) a game's scheduled start
+START_MARGIN_S = 120.0  # ... nor this close to a game's scheduled start
+START_SETTLE_S = 300.0  # ... nor this long after it (the opening minutes: quotes come and go)
+IN_PLAY_MIN_RESOLVE_S = 900.0  # in play, no trade in a market resolving sooner than this (the rescue would outlive it)
 PAUSED_S = 60.0  # after an order turned away for paused trading, Kalshi is left alone this long
 STATUS_MAX_AGE_S = 90.0  # a read of Kalshi's exchange status older than this vouches for nothing
 SELLBACK_WINDOW_S = 3600.0  # the circuit breaker counts sell-backs over this long
@@ -305,8 +313,8 @@ class LiveGuard(Guard):
             return "feed not fresh"
         if self.kalshi_closed(pair.kalshi):
             return "Kalshi trading paused"
-        if self.started(pair):
-            return "game under way"
+        if why := self.near_start(pair, days):
+            return why
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         why = super().__call__(pair, days)
@@ -333,10 +341,27 @@ class LiveGuard(Guard):
             return True
         return False
 
-    def started(self, pair) -> bool:
-        """The pair's game is under way, or about to be (see the module docstring)."""
+    def start_of(self, pair) -> float | None:
+        """The pair's game's scheduled start, the earlier of the two venues' if both know it."""
         known = [t for t in (kalshi_start_ts(pair.kalshi), self.starts.get(pair.pm)) if t]
-        return bool(known) and time.time() >= min(known) - START_MARGIN_S
+        return min(known) if known else None
+
+    def in_play(self, pair) -> bool:
+        """The pair's game is past its opening minutes (see the module docstring)."""
+        start = self.start_of(pair)
+        return start is not None and time.time() >= start + START_SETTLE_S
+
+    def near_start(self, pair, days) -> str | None:
+        """Why the game's clock refuses this pick (see the module docstring), or None."""
+        start = self.start_of(pair)
+        if start is None:
+            return None
+        now = time.time()
+        if start - START_MARGIN_S <= now < start + START_SETTLE_S:
+            return "game starting"
+        if now >= start + START_SETTLE_S and days is not None and days * 86400 < IN_PLAY_MIN_RESOLVE_S:
+            return "in play, resolves too soon"
+        return None
 
     def kalshi_paused(self) -> None:
         """An order was just turned away for paused trading."""
@@ -354,8 +379,8 @@ class LiveGuard(Guard):
             return "halted"
         if self.kalshi_closed(pair.kalshi):
             return "Kalshi trading paused"
-        if self.started(pair):
-            return "game under way"
+        if why := self.near_start(pair, days):
+            return why
         if self.cooling and max(self.cooling.get(pair.kalshi, 0.0), self.cooling.get(pair.pm, 0.0)) > time.time():
             return "an order there just missed"
         return Guard.__call__(self, pair, days)
@@ -476,6 +501,8 @@ class LiveTrader(PaperTrader):
         shard of this pair's market."""
         budget = super()._budget(pair, days)
         g = self.guard
+        if g.in_play(pair):  # a leg left unhedged in play must be the cheap kind the rescue waits for
+            budget = {v: min(budget[v], self.cfg.live_in_play_stake_usd) for v in VENUES}
         shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
         real = {"K": (g.shard_cash or {}).get(shard, 0.0), "P": g.pm_cash or 0.0}
         out = {v: min(budget[v], real[v] - self.reserved[v] - CASH_MARGIN) for v in VENUES}

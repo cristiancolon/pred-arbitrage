@@ -1082,20 +1082,35 @@ def test_nothing_is_traded_while_kalshi_is_closed_or_about_to_close(tmp_path):
         assert h.guard.kalshi_closed("K-1")
 
 
-def test_nothing_is_traded_once_the_game_is_under_way_or_about_to_be(tmp_path):
-    h = LiveHarness(tmp_path)
+def test_nothing_is_traded_around_the_start_and_little_in_play(tmp_path):
+    h = LiveHarness(tmp_path, live_in_play_stake_usd=2.5)
     h.market()
     h.db.execute("INSERT INTO markets (venue, id, start_ts) VALUES ('P', 'p-1', ?)", (time.time() + 60,))
     h.db.commit()
     h.guard.read_records(h.cfg.db_path, "live_trades")
     h.guard.series = {"K"}  # (the test database has no settled series)
-    assert h.trade() is None and not h.ex.sent and h.trader.stats["game under way"] == 1
-    h.guard.starts["p-1"] = time.time() + 3600  # moved back an hour
-    assert h.trade(window=2.0)["status"] == "open"
+    assert h.trade() is None and not h.ex.sent and h.trader.stats["game starting"] == 1
+    h.guard.starts["p-1"] = time.time() - 200  # three minutes in: the opening minutes still
+    assert h.trade(window=2.0) is None and not h.ex.sent and h.trader.stats["game starting"] == 2
+    # Ten minutes in, the pair is traded, unless its market resolves within the rescue.
+    h.guard.starts["p-1"] = time.time() - 600
+    assert h.guard.in_play(PAIR) and h.guard.passing(PAIR, 1.0) is None
+    assert h.guard(PAIR, 10 / 1440) == "in play, resolves too soon"
     # Kalshi's ticker carries the original start: the earlier of the two counts.
     darts = replace(PAIR, kalshi="KXDARTSMATCH-26OCT021820RSZAGHAY-RSZA")
-    assert h.guard.started(darts) and h.guard.passing(darts, 1.0) == "game under way"
-    assert not h.guard.started(replace(PAIR, pm="p-2"))  # no start time known: not held to it
+    assert h.guard.in_play(darts) and h.guard.start_of(darts) < h.guard.starts["p-1"]
+    unknown = replace(PAIR, pm="p-2")  # no start time known: not held to any of it
+    assert not h.guard.in_play(unknown) and h.guard.passing(unknown, 10 / 1440) is None
+    # The trade is small: each leg at most live_in_play_stake_usd (not a shard short of cash).
+    t = h.trade(window=3.0)
+    assert t["status"] == "open" and 0 < t["planned_size"] < 10 and max(t["k_out"], t["p_out"]) <= 2.5
+    assert h.trader.shard_short is None
+    # Not yet started, and more than two minutes off: a full trade (the account's cap).
+    h.guard.starts["p-1"] = time.time() + 3600
+    h.guard.held.clear()
+    h.market()
+    full = h.trade(window=4.0)
+    assert full["planned_size"] > t["planned_size"] and max(full["k_out"], full["p_out"]) > 2.5
 
 
 @pytest.mark.parametrize("reply", ["paused", "exchange_is_paused"])

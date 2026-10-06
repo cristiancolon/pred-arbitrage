@@ -33,11 +33,25 @@ function StatusPill({ enabled, account }) {
   return html`<span class="pill on"><span class="dot good pulse"></span>Live · watching</span>`;
 }
 
+const MOVE = { deposit: "deposit", advance: "deposit advance", withdrawal: "withdrawal", bonus: "bonus",
+  trade: "trade", payout: "payout" };
+
+// Your own deposits, withdrawals, bonuses and trades since live trading started (moves.py).
+function ownTitle(own) {
+  const lines = (own.recent || []).map((m) => `${dateTime(m.ts)} · ${VENUE[m.venue]} ${MOVE[m.kind] || m.kind}`
+    + `${m.market ? ` in ${m.market}` : ""}: ${signed(m.amount)}`);
+  const errors = Object.entries(own.errors || {}).map(([v, e]) => `Reading ${VENUE[v]}'s ledger failed: ${e}`);
+  return ["Your own deposits, withdrawals, bonuses and trades in markets the trader never traded, since live "
+    + "trading started. They're left out of the change.", ...lines, ...errors].join("\n");
+}
+
 function Hero({ data, enabled, a }) {
   const cash = a ? a.cash.K + a.cash.P : null;
   const tied = a ? a.tied.K + a.tied.P : null;
   const bankroll = a ? cash + tied : null;
   const start = a?.start ? a.start.K + a.start.P : null;
+  const own = a?.own ? a.own.K + a.own.P : 0;
+  const change = bankroll - start - own;
   const pnl = a ? a.realized + a.locked : data?.totals?.pnl;
   const today = data?.today;
   return html`<section class="hero card">
@@ -47,8 +61,10 @@ function Hero({ data, enabled, a }) {
       <div class="hero-sub">
         <span><i class="sw k"></i>Cash ${money(cash)}</span>
         <span><i class="sw t"></i>In open trades ${money(tied)} <span class="muted">at cost</span></span>
-        ${start != null && html`<span title="The venues' real balances when live trading started, and the change since (open trades at cost)">
-          Started at ${money(start)} <span class=${tone(bankroll - start)}>${signed(bankroll - start)}</span></span>`}
+        ${start != null && html`<span title="The venues' real balances when live trading started, and what trading has changed since (open trades at cost), not counting your own money moves">
+          Started at ${money(start)} <span class=${tone(change)}>${signed(change)}</span></span>`}
+        ${start != null && a.own && (Math.abs(own) >= 0.005 || a.own.errors) && html`<span class="muted" title=${ownTitle(a.own)}>
+          Your own money moves ${signed(own)}</span>`}
       </div>
       ${a && bankroll > 0 && html`<div class="stack" aria-hidden="true">
         <span class="k" style=${`flex:${a.cash.K}`} title=${`Kalshi cash ${money(a.cash.K)}`}></span>

@@ -249,6 +249,19 @@ CREATE TABLE IF NOT EXISTS live_orders (
 );
 CREATE INDEX IF NOT EXISTS live_orders_ts ON live_orders (ts);
 
+-- Your own money moves since live trading started (moves.py): deposits, withdrawals,
+-- bonuses, and your trades in markets the live trader never traded, from the venues'
+-- ledgers. The Trading page leaves them out of the account's change since it started.
+CREATE TABLE IF NOT EXISTS live_moves (
+    id TEXT PRIMARY KEY,            -- the ledger entry, e.g. K:fill:<fill id>, P:<transaction id>
+    venue TEXT NOT NULL,            -- K | P
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,             -- deposit | advance | withdrawal | bonus | trade | payout
+    amount REAL NOT NULL,           -- what it moved the venue's cash by: + in, - out
+    market TEXT,
+    note TEXT
+);
+
 -- How each market we've paired settled (results.py): what one YES contract paid.
 CREATE TABLE IF NOT EXISTS results (
     venue TEXT NOT NULL,            -- K | P

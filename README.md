@@ -358,7 +358,9 @@ Nothing needs a button press: new markets flow through to the scanner on their o
 
 - **Trading** (the home page). The live account at a glance: the total bankroll (cash
   plus open trades at cost) and how it splits between Kalshi, Polymarket US and open
-  trades; each venue's cash, with Kalshi's broken down by exchange shard; the current
+  trades; what trading has changed it by since live trading started, leaving out your
+  own deposits, withdrawals, bonuses and trades in markets the trader never traded
+  (read from both venues' ledgers, `arbscan/moves.py`); each venue's cash, with Kalshi's broken down by exchange shard; the current
   per-trade cap (`live_max_stake_frac` of the bankroll, so it grows with it); live P&L
   (settled, locked in on open trades, and today's); the share of each pick that filled,
   overall and per venue; the round trip of the latest real orders; a P&L chart; the

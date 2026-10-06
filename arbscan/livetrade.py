@@ -94,10 +94,11 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import confirm
+from . import confirm, moves
 from .catalog import kalshi_start_ts
 from .dryrun import SERIES_SQL, Guard, clean_series
 from .fees import order_fee, per_contract
+from .http import make_client
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
 from .paper import VENUES, PaperTrader, _opposite, breakeven_price, limit_for
 from .shards import Rebalancer
@@ -188,6 +189,7 @@ class Journal:
 
     def __init__(self, path):
         self.path = Path(path)
+        self._markets: set[str] | None = None
 
     def _add(self, rec: dict) -> None:
         with open(self.path, "a") as f:  # closed at once, so it's with the OS before the order goes
@@ -197,6 +199,8 @@ class Journal:
         self._add({"ts": time.time(), "event": "send", "trade": trade, "id": o.client_id, "venue": o.venue,
                    "market": o.market, "side": o.side, "action": o.action, "qty": o.qty, "limit": o.limit,
                    "before": before})
+        if self._markets is not None:
+            self._markets.add(o.market)
 
     def done(self, res: Result) -> None:
         self._add({"ts": time.time(), "event": "done", "id": res.order.client_id, "status": res.status,
@@ -205,6 +209,24 @@ class Journal:
 
     def clear(self, ids, why: str) -> None:
         self._add({"ts": time.time(), "event": "cleared", "ids": list(ids), "why": why})
+
+    def markets(self) -> set[str]:
+        """Every market an order was ever sent to (the file is read once)."""
+        if self._markets is None:
+            try:
+                lines = self.path.read_text().splitlines()
+            except FileNotFoundError:
+                lines = []
+            found = set()
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue  # a line cut short by a crash
+                if rec.get("event") == "send" and rec.get("market"):
+                    found.add(rec["market"])
+            self._markets = found
+        return self._markets
 
     def unresolved(self) -> list[dict]:
         """Orders sent whose outcome was never learned, and not since cleared by hand."""
@@ -935,6 +957,12 @@ class LiveRun:
         self.shards = Rebalancer(kalshi, self.guard, self.trader, kmeta) if cfg.live_shard_rebalance else None
         if self.shards is not None:
             self.guard.on_short = self.shards.ran_short
+        # Your own deposits, withdrawals and trades, read from the venues' ledgers (moves.py).
+        self.moves = moves.Moves(db, out, self._ours, idle=lambda: not self.trader.busy)
+        self.traded: set[str] = set()  # markets in the live trades and real orders on record
+        self.journal.markets()
+        self.ledger_http = None  # the ledger reads' own connections, opened by run()
+        self.moves_task: asyncio.Task | None = None
         self.guard.poll()
         stuck = self.journal.unresolved()
         if stuck and not self.guard.halted:
@@ -942,9 +970,50 @@ class LiveRun:
                             + ", ".join(f"{NAMES[s['venue']]} {s['market']}" for s in stuck[:5])
                             + "); check those positions, then run arbscan live-resume --checked")
 
+    def _since(self) -> float | None:
+        """When live trading started: your own money moves count from then."""
+        return (self.trader.start or {}).get("ts")
+
+    def _ours(self, market: str) -> bool:
+        """The live trader (or an order test) has sent an order in ``market``: what
+        moves money there is trading, not yours."""
+        return market in self.traded or market in self.journal.markets()
+
+    def _read_traded(self) -> set[str]:
+        db = open_db(self.cfg.db_path)
+        try:
+            out = {m for (m,) in db.execute("SELECT DISTINCT market FROM live_orders WHERE mode IN ('live', 'test')")}
+            for (pair,) in db.execute(f"SELECT DISTINCT pair FROM {self.trader.table}"):
+                out.update(pair.split("|", 1))
+            return out
+        finally:
+            db.close()
+
+    async def read_moves(self) -> None:
+        """Read your own money moves since live trading started (moves.py)."""
+        try:
+            self.traded = await asyncio.to_thread(self._read_traded)
+            if self.ledger_http is None:  # kept alive from one read to the next (moves.EVERY_S)
+                self.ledger_http = make_client(trading=True)
+            await self.moves.refresh(KalshiTrading(self.ledger_http, self.kalshi.base, self.kalshi.signer),
+                                     PMTrading(self.ledger_http, self.pm.base, self.pm.signer), self._since())
+        except Exception as e:
+            log.warning("live: reading your own money moves failed: %s", e)
+
     async def run(self, stop: asyncio.Event) -> None:
         """Keep the stop file, the settlement records and the account current."""
-        next_records = next_account = next_schedule = 0.0
+        try:
+            await self._run(stop)
+        finally:
+            if self.moves_task is not None:
+                self.moves_task.cancel()
+                await asyncio.gather(self.moves_task, return_exceptions=True)
+            if self.ledger_http is not None:
+                await self.ledger_http.aclose()
+                self.ledger_http = None
+
+    async def _run(self, stop: asyncio.Event) -> None:
+        next_records = next_account = next_schedule = next_moves = 0.0
         while not stop.is_set():
             self.guard.poll()
             now = time.monotonic()
@@ -976,6 +1045,11 @@ class LiveRun:
                             self.trader.sync_cash()
                     except Exception as e:
                         log.warning("live: rebalancing Kalshi's shards failed: %s", e)
+            # In the background, on their own connections: a trade never waits for these.
+            if (now >= next_moves and self._since() is not None and not self.trader.busy
+                    and (self.moves_task is None or self.moves_task.done())):
+                next_moves = now + moves.EVERY_S
+                self.moves_task = asyncio.create_task(self.read_moves())
             try:
                 await asyncio.wait_for(stop.wait(), timeout=POLL_S)
             except asyncio.TimeoutError:
@@ -983,7 +1057,9 @@ class LiveRun:
 
     def snapshot(self) -> dict:
         g, cfg = self.guard, self.cfg
-        return {**self.trader.snapshot(), "start": self.trader.start, "halted": g.halted, "rejects": self.trader.rejects,
+        return {**self.trader.snapshot(), "start": self.trader.start,
+                "own": self.moves.snapshot(self._since()),
+                "halted": g.halted, "rejects": self.trader.rejects,
                 "limits": {"series": None if g.series is None else len(g.series), "held": len(g.held),
                            "shard_cash": g.shard_cash, "pm_cash": g.pm_cash, "attested_until": g.attested_until or None,
                            "lost_today": g.lost_today, "trades_today": g.trades_today,

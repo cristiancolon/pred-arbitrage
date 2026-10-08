@@ -2,11 +2,12 @@
 import { html } from "../vendor/preact-htm.js";
 import { ago, cents, dateTime, dirLabel, int, money, navigate, useFetch, useNow, usePref } from "../lib.js";
 import { ChartCard, LineChart } from "../charts.js";
-import { Badge, Banner, Card, DataTable, Empty, Icon, PairName, Seg } from "../ui.js";
+import { Badge, Banner, Card, DataTable, Empty, Icon, PairName, RangeSeg, Seg } from "../ui.js";
 
 const RANGES = [
   { value: 24, label: "24h" }, { value: 168, label: "7d" }, { value: 720, label: "30d" }, { value: 2160, label: "90d" },
 ];
+const QUICK_DAYS = [14, 21, 45, 60];  // one-click picks between the presets; the slider does any day count
 const VIEWS = [{ value: "all", label: "All" }, { value: "open", label: "Open" }, { value: "settled", label: "Settled" }];
 const VENUE = { K: "Kalshi", P: "Polymarket US" };
 const NOT_SKIPS = new Set(["sent", "open", "unwound", "missed", "confirming the book"]);
@@ -288,7 +289,7 @@ export function Trading() {
 
     <${ChartCard} title="P&L over time" loading=${loading && data}
       sub="Cumulative: settled trades at their result, open ones at the profit they locked in"
-      actions=${html`<${Seg} label="Time range" options=${RANGES} value=${hours} onChange=${setHours} />`}
+      actions=${html`<${RangeSeg} label="Time range" options=${RANGES} value=${hours} onChange=${setHours} quick=${QUICK_DAYS} />`}
       table=${{ columns: ["Time", "P&L"], rows: (data?.curve || []).slice().reverse().map((p) => [new Date(p[0] * 1000).toLocaleString(), money(p[1])]) }}>
       <${LineChart} series=${series} height=${220} zero=${0} zeroLabel="Break-even" area yFmt=${(v) => money(v, Math.abs(v) < 10 ? 2 : 0)}
         xDomain=${data ? [data.since, now] : undefined} emptyText="No live trades in this range yet" />

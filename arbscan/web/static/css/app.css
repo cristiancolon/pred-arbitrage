@@ -211,6 +211,52 @@ kbd {
 .seg button { border: 0; background: transparent; height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 550; color: var(--text-2); cursor: pointer; }
 .seg button[aria-pressed="true"] { background: var(--surface-1); color: var(--text-1); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
 
+/* A time range: preset segments, then a calendar segment with a slider popover. */
+.range-seg { position: relative; display: inline-flex; }
+.range-seg .seg button { display: inline-flex; align-items: center; gap: 5px; }
+.range-seg .seg button svg { flex: none; }
+.range-seg .seg button[aria-expanded="true"]:not([aria-pressed="true"]) { background: var(--surface-3); color: var(--text-1); }
+.range-pop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 10; width: 272px; padding: 14px 16px 12px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-pop);
+  animation: drop 0.14s ease-out;
+}
+@keyframes drop { from { transform: translateY(-4px); opacity: 0; } }
+.range-pop-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-size: 13px; color: var(--text-2); }
+.range-pop-head b { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; color: var(--text-1); margin-right: 3px; }
+.range-pop-head .muted { font-size: 12px; }
+/* --at (0..1) places the fill edge and the tick labels on the thumb's centre. */
+.range-pop input[type="range"] {
+  --pos: calc(8px + var(--at) * (100% - 16px));
+  -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 20px; margin: 0; background: transparent; cursor: pointer;
+}
+.range-pop input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--accent) var(--pos), var(--surface-3) var(--pos));
+}
+.range-pop input[type="range"]::-moz-range-track {
+  height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--accent) var(--pos), var(--surface-3) var(--pos));
+}
+.range-pop input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; box-sizing: border-box; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%;
+  background: var(--surface-1); border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); transition: box-shadow 0.12s;
+}
+.range-pop input[type="range"]::-moz-range-thumb {
+  box-sizing: border-box; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--surface-1); border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); transition: box-shadow 0.12s;
+}
+.range-pop input[type="range"]:focus-visible { outline: none; }
+.range-pop input[type="range"]:focus-visible::-webkit-slider-thumb, .range-pop input[type="range"]:active::-webkit-slider-thumb { box-shadow: 0 0 0 5px var(--accent-soft); }
+.range-pop input[type="range"]:focus-visible::-moz-range-thumb, .range-pop input[type="range"]:active::-moz-range-thumb { box-shadow: 0 0 0 5px var(--accent-soft); }
+.range-ticks { position: relative; height: 16px; margin-top: 2px; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.range-ticks span { position: absolute; left: calc(8px + var(--at) * (100% - 16px)); transform: translateX(-50%); }
+.range-quick { display: flex; gap: 6px; margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--border); }
+.range-quick button {
+  flex: 1; height: 28px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface-2);
+  font-size: 12.5px; font-weight: 550; color: var(--text-2); cursor: pointer;
+}
+.range-quick button:hover { background: var(--surface-3); color: var(--text-1); }
+.range-quick button[aria-pressed="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
+
 .input, .select {
   height: 32px; padding: 0 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
   background: var(--surface-1); font-size: 13px; min-width: 0;
@@ -547,5 +593,6 @@ a.pill:hover { text-decoration: none; border-color: var(--border-strong); }
   .nav-group { display: none; }
   .card-head { flex-wrap: wrap; }
   .card-head .actions { margin-left: 0; }
+  .range-pop { right: auto; left: 0; }
   .metric .value { font-size: 24px; }
 }

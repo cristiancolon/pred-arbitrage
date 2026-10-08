@@ -32,9 +32,9 @@ function niceDomain(lo, hi, count = 4) {
   return { lo: a, hi: b, ticks };
 }
 
-const TIME_STEPS = [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800];
+const TIME_STEPS = [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 259200, 604800, 1209600, 2419200];
 function timeTicks(t0, t1, maxTicks) {
-  const step = TIME_STEPS.find((s) => (t1 - t0) / s <= maxTicks) || 604800;
+  const step = TIME_STEPS.find((s) => (t1 - t0) / s <= maxTicks) || TIME_STEPS.at(-1);
   const off = -new Date().getTimezoneOffset() * 60;
   const ticks = [];
   for (let t = Math.ceil((t0 + off) / step) * step - off; t <= t1; t += step) ticks.push(t);

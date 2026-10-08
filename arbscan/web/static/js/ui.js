@@ -1,5 +1,5 @@
 // Shared UI pieces.
-import { html, useEffect, useState } from "./vendor/preact-htm.js";
+import { html, useEffect, useRef, useState } from "./vendor/preact-htm.js";
 import { cents, int, pmTitle, splitTitle, useStore } from "./lib.js";
 
 const ICONS = {
@@ -29,6 +29,7 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   table: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/>',
   skip: '<path d="M5 5l9 7-9 7z"/><path d="M19 5v14"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
 };
 
 export function Icon({ name, size = 16, cls = "" }) {
@@ -108,6 +109,53 @@ export function Seg({ options, value, onChange, label }) {
     ${options.map((o) => html`<button type="button" aria-pressed=${o.value === value} onClick=${() => onChange(o.value)} title=${o.title}>
       ${o.icon ? html`<${Icon} name=${o.icon} size=${14} />` : o.label}
     </button>`)}
+  </div>`;
+}
+
+// Seg for a time range in hours, plus a last segment that opens a slider for any whole
+// number of days between `minDays` and `maxDays`, with a few one-click picks under it.
+export function RangeSeg({ options, value, onChange, label, minDays = 7, maxDays = 90, ticks = [7, 30, 60, 90], quick = [] }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const wrap = useRef();
+  const trigger = useRef();
+  const custom = !options.some((o) => o.value === value);
+  const days = Math.min(maxDays, Math.max(minDays, Math.round(value / 24)));
+  const shown = draft ?? days;
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => !wrap.current?.contains(e.target) && setOpen(false);
+    const esc = (e) => { if (e.key === "Escape") { setOpen(false); trigger.current?.focus(); } };
+    addEventListener("pointerdown", away);
+    addEventListener("keydown", esc);
+    return () => { removeEventListener("pointerdown", away); removeEventListener("keydown", esc); };
+  }, [open]);
+  const pick = (d) => { setDraft(null); if (d * 24 !== value) onChange(d * 24); };
+  const at = (d) => `--at:${((d - minDays) / (maxDays - minDays)).toFixed(4)}`;  // 0..1 along the track
+  const since = new Date(Date.now() - shown * 86400e3).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return html`<div class="range-seg" ref=${wrap}>
+    <div class="seg" role="group" aria-label=${label}>
+      ${options.map((o) => html`<button type="button" aria-pressed=${o.value === value} onClick=${() => { setOpen(false); onChange(o.value); }}>${o.label}</button>`)}
+      <button type="button" ref=${trigger} aria-pressed=${custom} aria-expanded=${open} aria-haspopup="dialog"
+        title=${`Any range from ${minDays} to ${maxDays} days`} aria-label=${custom ? `Custom range, ${days} days` : "Custom range"}
+        onClick=${() => { setDraft(null); setOpen(!open); }}>
+        <${Icon} name="calendar" size=${14} />${custom && html`<span>${days}d</span>`}
+      </button>
+    </div>
+    ${open && html`<div class="range-pop" role="dialog" aria-label="Custom range">
+      <div class="range-pop-head">
+        <span><b class="num">${shown}</b> days</span>
+        <span class="muted">since ${since}</span>
+      </div>
+      <input type="range" min=${minDays} max=${maxDays} step="1" value=${shown} aria-label="Days" style=${at(shown)}
+        onInput=${(e) => setDraft(+e.currentTarget.value)} onChange=${(e) => pick(+e.currentTarget.value)} />
+      <div class="range-ticks" aria-hidden="true">
+        ${ticks.map((d) => html`<span style=${at(d)}>${d}d</span>`)}
+      </div>
+      <div class="range-quick">
+        ${quick.map((d) => html`<button type="button" aria-pressed=${shown === d} onClick=${() => { pick(d); setOpen(false); }}>${d}d</button>`)}
+      </div>
+    </div>`}
   </div>`;
 }
 

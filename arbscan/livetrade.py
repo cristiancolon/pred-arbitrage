@@ -82,6 +82,18 @@ read back, when orders keep being rejected, or when it starts up and finds an or
 the journal whose outcome it never learned (a crash mid-trade). Creating the file by
 hand stops it too (``arbscan live-halt``). A stop lasts until the file is removed
 (``arbscan live-resume``), restarts included.
+
+**What trades are worth** (``tied``, which with the cash makes the bankroll and the
+stake cap), until the venues have paid them into cash:
+- each leg counts at cost until its market has a result, then at what that pays;
+- a leg whose own result isn't in yet counts at what the other leg's result leaves it.
+  The two legs are the two sides of one bet, so a leg whose other side lost has won;
+  a void's split price says nothing, and the leg stays at cost;
+- a settled trade counts its payouts until both venues have paid them. Kalshi pays
+  out some minutes after it determines a result;
+- a leg paid out counts nothing: its money is in the cash.
+The results come from results.py, which reads these markets every ``RECHECK_LIVE_S``
+until they're paid out, and from Kalshi's lifecycle events.
 """
 
 import asyncio
@@ -101,6 +113,7 @@ from .fees import order_fee, per_contract
 from .http import make_client
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
 from .paper import VENUES, PaperTrader, _opposite, breakeven_price, limit_for
+from .results import PAYOUT_WATCH_S, outcomes as results_outcomes
 from .shards import Rebalancer
 from .store import open_db
 
@@ -482,7 +495,8 @@ class LiveTrader(PaperTrader):
     """Trades the dry run's picks with real orders; see the module docstring."""
 
     def __init__(self, cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi: KalshiTrading, pm: PMTrading,
-                 guard: LiveGuard, journal: Journal, wake=None, check: "confirm.BookCheck | None" = None):
+                 guard: LiveGuard, journal: Journal, wake=None, check: "confirm.BookCheck | None" = None,
+                 outcomes=None):
         live_cfg = replace(cfg, bankroll_usd=cfg.live_bankroll_usd, paper_min_profit_usd=cfg.live_min_profit_usd)
         super().__init__(live_cfg, db, out, latency, kbooks, pbooks, kmeta, wake=wake, name="live", guard=guard,
                          max_stake=cfg.live_max_stake_frac)
@@ -501,7 +515,16 @@ class LiveTrader(PaperTrader):
         self.resolve_waits = RESOLVE_WAITS_S
         self.rescue_every = RESCUE_EVERY_S
         self.shard_short: tuple | None = None  # (pair, shard, dollars missing, cash there) from the latest sizing
-        self.paid: dict[str, set[str]] = {}  # open trade -> the venues that have already settled their leg
+        # outcomes(keys): each leg's result and whether its venue has paid it out
+        # (results.outcomes); without it, a result counts as paid out once it's in.
+        self.outcomes = outcomes
+        self.paid: set[tuple[str, str]] = set()  # (trade, venue): legs the venue has paid into its cash
+        # Trades settled lately that a venue may not have paid out yet: trade id -> row.
+        self.unpaid: dict[str, dict] = {r["id"]: dict(r) for r in db.execute(
+            f"SELECT * FROM {self.table} WHERE status = 'settled' AND settled_ts >= ? AND (k_hold > 0 OR p_hold > 0)",
+            (time.time() - PAYOUT_WATCH_S,))}
+        if outcomes is not None:
+            self._value(outcomes)
         guard.stake_cap = lambda: self.stake_cap() or 0.0
         midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
         for r in db.execute(f"SELECT ts, pair, status, settled_ts, pnl, unwind_qty, unwind_loss, locked_profit, k_hold, "
@@ -911,34 +934,82 @@ class LiveTrader(PaperTrader):
 
     # --- settling -----------------------------------------------------------------------
 
+    def _settling(self, finished: set[str], now: float) -> list[dict]:
+        """Every open trade: its legs are valued by their results as they come in
+        (``_value``), so it settles as soon as both are in, whatever the scanner knows
+        of its pair."""
+        return list(self.open.values())
+
     def settle(self, lookup, finished: set[str]) -> int:
         before = dict(self.open)
         n = super().settle(lookup, finished)
         for tid, t in before.items():
             if tid not in self.open:
-                for v in self.paid.pop(tid, ()):  # (already out of ``tied``: settling took it out again)
-                    self.tied[v] += t[f"{v.lower()}_out"] or 0.0
                 self.guard.record_pnl((t["pnl"] or 0.0) + early_loss(t))  # what wasn't counted already
-        if self._paid_legs(lookup) or n:
+                self.unpaid[tid] = t  # its payouts count until the venues have paid them
+        outcomes = self.outcomes or (lambda keys: {k: (y, True) for k, y in lookup(keys).items()})
+        if self._value(outcomes) or n:
             self.account_stale = True  # read what the venues actually paid out
         return n
 
-    def _paid_legs(self, lookup) -> int:
-        """A leg whose venue has settled it is paid out, into the venue's cash, even while
-        the other venue hasn't settled its own: it stops counting as money in open trades,
-        or the account counts it twice (on 2026-10-03 Polymarket US paid $29 on two boxing
-        trades hours before Kalshi settled them, and the bankroll read $30 high). Returns
-        how many legs were newly found paid."""
-        want = [(tid, v, m) for tid, t in self.open.items()
-                for v, m in zip(VENUES, t["pair"].split("|", 1)) if v not in self.paid.get(tid, ())]
-        values = lookup({(v, m) for _, v, m in want}) if want else {}
-        n = 0
-        for tid, v, m in want:
-            if (v, m) in values:
-                self.tied[v] -= self.open[tid][f"{v.lower()}_out"] or 0.0
-                self.paid.setdefault(tid, set()).add(v)
-                n += 1
-        return n
+    def _value(self, outcomes) -> bool:
+        """What the account's trades are worth until the venues have paid them into cash
+        (``tied``, see the module docstring): a leg paid out counts nothing here, or the
+        account would count it twice (on 2026-10-03 Polymarket US paid $29 on two boxing
+        trades hours before Kalshi settled them, and the bankroll read $30 high; on
+        2026-10-09 Kalshi paid out a leg of a pair the scanner had dropped, and it still
+        counted at cost for hours). Returns whether a venue has paid out a leg since the
+        last look."""
+        now = time.time()
+        for tid in [tid for tid, t in self.unpaid.items() if (t["settled_ts"] or 0) < now - PAYOUT_WATCH_S]:
+            del self.unpaid[tid]  # paid out long ago, or never to be known
+        trades = [*self.open.values(), *self.unpaid.values()]
+        keys = {key for t in trades for key in _legs(t)}
+        known = outcomes(keys) if keys else {}
+        tied, paid = {v: 0.0 for v in VENUES}, set()
+        for t in trades:
+            res = {key[0]: known.get(key) for key in _legs(t)}
+            for v in VENUES:
+                if res[v] is not None and res[v][1]:
+                    paid.add((t["id"], v))  # in the venue's cash
+                else:
+                    tied[v] += _leg_value(t, v, res)
+        for tid in [tid for tid in self.unpaid if (tid, "K") in paid and (tid, "P") in paid]:
+            del self.unpaid[tid]
+        new = paid - self.paid
+        self.tied, self.paid = tied, paid
+        return bool(new)
+
+    def markets(self, venue: str) -> set[str]:
+        """The markets on ``venue`` the account holds, or is still to be paid out on."""
+        return {m for t in (*self.open.values(), *self.unpaid.values()) for v, m in _legs(t) if v == venue}
+
+
+def _legs(t: dict) -> list[tuple[str, str]]:
+    return list(zip(VENUES, t["pair"].split("|", 1)))
+
+
+def _pays(side: str, yes: float) -> float:
+    """What one contract of ``side`` pays when one YES contract pays ``yes``."""
+    return yes if side == "yes" else 1.0 - yes
+
+
+def _leg_value(t: dict, v: str, res: dict) -> float:
+    """What a leg its venue hasn't paid out yet will bring in: what its result pays, once
+    one is in; until then what the other leg's result leaves it (the two legs are the
+    two sides of one bet: a leg whose other side lost has won), unless that was a
+    void's split price; else what it cost."""
+    hold, side = t[f"{v.lower()}_hold"] or 0.0, t[f"{v.lower()}_side"]
+    if res[v] is not None:
+        return hold * _pays(side, res[v][0])
+    if t["status"] == "settled":
+        return t[f"payout_{v.lower()}"] or 0.0
+    u = "P" if v == "K" else "K"
+    if res[u] is not None:
+        other = _pays(t[f"{u.lower()}_side"], res[u][0])
+        if other < EPS or other > 1.0 - EPS:
+            return hold * (1.0 - round(other))
+    return t[f"{v.lower()}_out"] or 0.0
 
 
 class LiveRun:
@@ -953,7 +1024,7 @@ class LiveRun:
         self.journal = Journal(folder / JOURNAL_FILE)
         self.check = confirm.BookCheck(pm.book, pbooks, reprice)
         self.trader = LiveTrader(cfg, db, out, latency, kbooks, pbooks, kmeta, kalshi, pm, self.guard, self.journal,
-                                 wake=wake, check=self.check)
+                                 wake=wake, check=self.check, outcomes=lambda keys: results_outcomes(db, keys))
         self.shards = Rebalancer(kalshi, self.guard, self.trader, kmeta) if cfg.live_shard_rebalance else None
         if self.shards is not None:
             self.guard.on_short = self.shards.ran_short

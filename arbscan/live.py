@@ -369,6 +369,8 @@ class LiveScanner(Scanner):
                 except Exception as e:
                     log.warning("%s settlement check failed: %s", trader.name, e)
                 trader.forget_idle()
+            if self.live is not None:  # Kalshi's word that they settled, though no longer watched
+                self.kfeed.also = self.live.trader.markets("K")
 
     def feed_state(self) -> dict:
         return {"kalshi": self.kfeed.stats.snapshot(), "pmus": self.pfeed.stats.snapshot()}

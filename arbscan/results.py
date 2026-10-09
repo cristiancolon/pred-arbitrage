@@ -18,6 +18,16 @@ Where results come from:
   three days in case a venue corrects it. Polymarket US doesn't
   publish when it resolved a market, so ``first_final_ts`` (when we first saw the
   result) stands in for it.
+- The live account's markets (``live_markets``: those of open live trades, and of
+  trades settled lately that a venue may not have paid out yet) are read every
+  ``RECHECK_LIVE_S`` until their venue has paid them out, whatever the scanner knows
+  of them: a pair unpaired while a trade on it was open, or retired before a restart,
+  has no book stream and no lifecycle events, and its Kalshi close time can be two
+  weeks after the game. A few dozen markets, one request a venue.
+
+Kalshi determines a result and pays it out later (``settled``, then ``finalized``),
+often a quarter of an hour apart; Polymarket US pays when it resolves. ``outcomes``
+says which.
 """
 
 import asyncio
@@ -29,9 +39,12 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 KALSHI_FINAL = {"determined", "settled", "finalized"}
+KALSHI_PAID = {"settled", "finalized"}  # paid out; ``determined`` comes first
 PM_FINAL = "MARKET_STATUS_RESOLVED"
 RECHECK_CLOSED_S = 600.0
 RECHECK_OPEN_S = 6 * 3600.0
+RECHECK_LIVE_S = 120.0  # a live trade's market, until its venue has paid it out
+PAYOUT_WATCH_S = 2 * 86400.0  # a settled live trade's markets, until paid out or this old
 # Venues occasionally correct a result: re-read results once a day for this long.
 RECHECK_FINAL_S = 86400.0
 FINAL_WATCH_S = 3 * 86400.0
@@ -135,19 +148,40 @@ def tracked_markets(db, extra_pairs=()) -> set[tuple[str, str]]:
     return out
 
 
+def live_markets(db, now: float) -> set[tuple[str, str]]:
+    """The markets of live trades still open, or settled within ``PAYOUT_WATCH_S`` with
+    contracts held to settlement (a venue may not have paid them out yet)."""
+    out = set()
+    for (pair,) in db.execute("SELECT pair FROM live_trades WHERE status = 'open' OR (status = 'settled' "
+                              "AND settled_ts >= ? AND (k_hold > 0 OR p_hold > 0))", (now - PAYOUT_WATCH_S,)):
+        k, _, pm = pair.partition("|")
+        out |= {("K", k), ("P", pm)}
+    return out
+
+
+def paid_out(venue: str, status: str | None) -> bool:
+    """A market with a result has been paid out (see the module docstring)."""
+    return status in KALSHI_PAID if venue == "K" else True
+
+
 def due(db, tracked: set[tuple[str, str]], finished: set[tuple[str, str]], now: float) -> list[tuple[str, str]]:
     """Markets to look up now, most overdue first."""
-    known = {(r[0], r[1]): (r[2], r[3], r[4], r[5]) for r in db.execute(
-        "SELECT venue, id, yes_value, closed_ts, checked_ts, first_final_ts FROM results")}
+    known = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6]) for r in db.execute(
+        "SELECT venue, id, yes_value, closed_ts, checked_ts, first_final_ts, status FROM results")}
+    live = live_markets(db, now)
     out = []
-    for key in tracked:
-        yes, closed, checked, final = known.get(key, (None, None, None, None))
+    for key in tracked | live:
+        yes, closed, checked, final, status = known.get(key, (None, None, None, None, None))
+        if checked is None:
+            out.append((0.0, key))
+            continue
+        if key in live and not (yes is not None and paid_out(key[0], status)):
+            if now - checked >= RECHECK_LIVE_S:
+                out.append((checked, key))
+            continue
         if yes is not None:
             if final is not None and now - final < FINAL_WATCH_S and now - checked >= RECHECK_FINAL_S:
                 out.append((checked, key))
-            continue
-        if checked is None:
-            out.append((0.0, key))
             continue
         closed_now = key in finished or (closed is not None and closed <= now)
         wait = RECHECK_CLOSED_S if closed_now else RECHECK_OPEN_S
@@ -221,4 +255,16 @@ def lookup(db, keys) -> dict[tuple[str, str], float]:
                        (venue, mid)).fetchone()
         if r is not None:
             out[(venue, mid)] = r[0]
+    return out
+
+
+def outcomes(db, keys) -> dict[tuple[str, str], tuple[float, bool]]:
+    """For each (venue, id) with a result: what one YES contract paid, and whether the
+    venue has paid it out yet."""
+    out = {}
+    for venue, mid in keys:
+        r = db.execute("SELECT yes_value, status FROM results WHERE venue = ? AND id = ? AND yes_value IS NOT NULL",
+                       (venue, mid)).fetchone()
+        if r is not None:
+            out[(venue, mid)] = (r[0], paid_out(venue, r[1]))
     return out

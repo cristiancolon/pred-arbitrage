@@ -60,6 +60,43 @@ def test_what_to_look_up_when(tmp_path):
     assert ("K", "K-1") in results.due(db, tracked, set(), NOW + 86400)
 
 
+def _live_trade(db, tid, pair, status, settled_ts=None, hold=10):
+    db.execute("INSERT INTO live_trades (id, ts, pair, direction, k_side, p_side, k_hold, p_hold, status, settled_ts) "
+               "VALUES (?, ?, ?, 'K:YES+P:NO', 'yes', 'no', ?, ?, ?, ?)",
+               (tid, NOW - 7200, pair, hold, hold, status, settled_ts))
+
+
+def test_the_live_accounts_markets_are_read_until_paid_out(tmp_path):
+    db = _db(tmp_path)
+    # An open trade on a pair no longer tracked (unpaired while held); a trade settled
+    # an hour ago; one settled long ago; and one sold back whole (nothing to be paid).
+    _live_trade(db, "a", "K-5|p-5", "open")
+    _live_trade(db, "b", "K-6|p-6", "settled", NOW - 3600)
+    _live_trade(db, "c", "K-7|p-7", "settled", NOW - 3 * 86400)
+    _live_trade(db, "d", "K-8|p-8", "settled", NOW - 60, hold=0)
+    db.commit()
+    assert results.live_markets(db, NOW) == {("K", "K-5"), ("P", "p-5"), ("K", "K-6"), ("P", "p-6")}
+    tracked = results.tracked_markets(db)
+    assert {("K", "K-5"), ("P", "p-5")} <= set(results.due(db, tracked, set(), NOW))  # never looked up
+    db.executemany(results.UPSERT, [
+        # Kalshi's close time is two weeks off and the scanner knows nothing of the pair.
+        results._row("K", "K-5", "inactive", None, None, NOW + 14 * 86400, None, NOW - results.RECHECK_LIVE_S, {}),
+        results._row("P", "p-5", "MARKET_STATUS_OPEN", None, None, NOW + 14 * 86400, None, NOW - 30, {}),
+        # Determined but not yet paid out: read again; Polymarket's is paid out.
+        results._row("K", "K-6", "determined", 1.0, "yes", NOW - 7200, None, NOW - results.RECHECK_LIVE_S, {}),
+        results._row("P", "p-6", "MARKET_STATUS_RESOLVED", 0.0, "No", NOW - 7200, None, NOW - 600, {}),
+    ])
+    due = set(results.due(db, tracked, set(), NOW))
+    assert ("K", "K-5") in due and ("P", "p-5") not in due  # each every RECHECK_LIVE_S
+    assert ("K", "K-6") in due and ("P", "p-6") not in due
+    db.executemany(results.UPSERT, [results._row("K", "K-6", "finalized", 1.0, "yes", NOW - 7200, None, NOW - 600, {})])
+    assert ("K", "K-6") not in set(results.due(db, tracked, set(), NOW))  # paid out: once a day from now on
+    assert results.outcomes(db, {("K", "K-5"), ("K", "K-6"), ("P", "p-6")}) == {
+        ("K", "K-6"): (1.0, True), ("P", "p-6"): (0.0, True)}
+    db.executemany(results.UPSERT, [results._row("K", "K-5", "determined", 0.0, "no", None, None, NOW, {})])
+    assert results.outcomes(db, {("K", "K-5")}) == {("K", "K-5"): (0.0, False)}
+
+
 def test_recorder_and_backtest_views(tmp_path):
     db = _db(tmp_path)
 

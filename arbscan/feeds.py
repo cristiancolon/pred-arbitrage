@@ -275,6 +275,9 @@ class KalshiFeed(_Feed):
         self.on_lifecycle = on_lifecycle
         self.books: dict[str, KalshiBook] = {}
         self.rejected: set[str] = set()  # tickers Kalshi refused to subscribe to on their own
+        # Markets whose lifecycle events matter though their books aren't wanted: the
+        # live account's, whose pairs may have been dropped while it holds them.
+        self.also: set[str] = set()
         self._id = 0
         self._pending: dict[int, list[str]] = {}  # orderbook subscribe command id -> tickers
         self._lifecycle_id: int | None = None
@@ -370,7 +373,8 @@ class KalshiFeed(_Feed):
             self.on_update(t)
         elif kind == "market_lifecycle_v2":
             body = msg.get("msg") or {}
-            if self.on_lifecycle and body.get("market_ticker") in self.wanted:
+            t = body.get("market_ticker")
+            if self.on_lifecycle and (t in self.wanted or t in self.also):
                 self.on_lifecycle(body)
         elif kind == "subscribed":
             if msg.get("id") in self._pending:

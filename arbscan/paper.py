@@ -567,12 +567,16 @@ class PaperTrader:
 
     # --- settling -----------------------------------------------------------------------
 
+    def _settling(self, finished: set[str], now: float) -> list[dict]:
+        """Open trades to look up results for: their pair finished, or is past its expected resolution."""
+        return [t for t in self.open.values()
+                if t["pair"] in finished or (t["resolve_ts"] or now) + SETTLE_GRACE_S <= now]
+
     def settle(self, lookup, finished: set[str]) -> int:
         """Pay out positions whose markets both have results (results.py records them).
         ``lookup(keys)`` gives what one YES contract paid per (venue, id). Returns how many."""
         now = time.time()
-        due = [t for t in self.open.values()
-               if t["pair"] in finished or (t["resolve_ts"] or now) + SETTLE_GRACE_S <= now]
+        due = self._settling(finished, now)
         if not due:
             return 0
         values = lookup({(v, m) for t in due for v, m in zip(VENUES, t["pair"].split("|", 1))})

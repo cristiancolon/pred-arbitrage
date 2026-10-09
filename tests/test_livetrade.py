@@ -212,7 +212,7 @@ class LiveHarness(Harness):
         self.checked = checked
         super().__init__(tmp_path, **cfg)
 
-    def new_trader(self):
+    def new_trader(self, outcomes=None):
         self.ex = Exchange()
         self.http = httpx.AsyncClient(transport=httpx.MockTransport(self.ex.handler))
         self.fresh = True
@@ -229,7 +229,7 @@ class LiveHarness(Harness):
         trader = LiveTrader(self.cfg, self.db, self.db, self.lat, self.kbooks, self.pbooks, self.kmeta,
                             KalshiTrading(self.http, K_BASE, SIGNER), pm,
                             self.guard, self.journal, wake=lambda pair, delay: self.woken.append((pair, delay)),
-                            check=self.check)
+                            check=self.check, outcomes=outcomes)
         trader.resolve_waits = (0.0, 0.0)
         trader.rescue_every = 0.0
         return trader
@@ -523,21 +523,85 @@ def test_settling_counts_toward_todays_losses(tmp_path):
     assert h.guard.lost_today == pytest.approx(t["k_out"] + t["p_out"])
 
 
+def _results(trader, known: dict) -> callable:
+    """The trader reads ``known``: (venue, market) -> (what one YES contract paid, paid
+    out yet). Returns the matching lookup for ``settle``."""
+    trader.outcomes = lambda keys: {k: known[k] for k in keys if k in known}
+    return lambda keys: {k: known[k][0] for k in keys if k in known}
+
+
 def test_a_leg_one_venue_has_paid_out_isnt_counted_twice(tmp_path):
     h = LiveHarness(tmp_path, live_lead_venue="K")
     h.market()
+    t = h.trade()  # YES on Kalshi at 45c, NO on Polymarket at 50c, 10 each
+    assert h.trader.tied == pytest.approx({"K": t["k_out"], "P": t["p_out"]})  # at cost: no result yet
+    known = {}
+    lookup = _results(h.trader, known)
+    # Polymarket has paid its NO out (YES lost); Kalshi has no result yet. Its YES lost
+    # too, as the other side of one bet: neither leg is money still to come.
+    known[("P", "p-1")] = (0.0, True)
+    h.trader.account_stale = False
+    assert h.trader.settle(lookup, set()) == 0
+    assert h.trader.tied == {"K": 0.0, "P": 0.0} and h.trader.account_stale and len(h.trader.open) == 1
+    h.trader.account_stale = False
+    h.trader.settle(lookup, set())  # (not twice)
+    assert h.trader.tied == {"K": 0.0, "P": 0.0} and not h.trader.account_stale
+    # Kalshi settles too: the trade is done, before its expected resolution and though
+    # the scanner never saw its pair finish.
+    known[("K", "K-1")] = (0.0, True)
+    assert h.trader.settle(lookup, set()) == 1
+    assert h.trader.tied == {"K": 0.0, "P": 0.0} and not h.trader.unpaid
+    assert h.trades()[-1]["pnl"] == pytest.approx(t["locked_profit"])
+
+
+def test_the_other_leg_counts_at_what_it_will_pay(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
     t = h.trade()
-    tied = dict(h.trader.tied)
-    # Polymarket has settled its leg (the payout is in its cash); Kalshi hasn't yet.
-    assert h.trader.settle(lambda keys: {k: 1.0 for k in keys if k == ("P", "p-1")}, set()) == 0
-    assert h.trader.tied["P"] == pytest.approx(tied["P"] - t["p_out"]) and h.trader.tied["K"] == tied["K"]
-    assert h.trader.account_stale and len(h.trader.open) == 1
-    h.trader.settle(lambda keys: {k: 1.0 for k in keys if k == ("P", "p-1")}, set())  # (not twice)
-    assert h.trader.tied["P"] == pytest.approx(tied["P"] - t["p_out"])
-    # Then Kalshi settles too, and the trade is done.
-    assert h.trader.settle(lambda keys: {("K", "K-1"): 0.0, ("P", "p-1"): 1.0}, {PAIR.id}) == 1
-    assert h.trader.tied == pytest.approx({"K": tied["K"] - t["k_out"], "P": tied["P"] - t["p_out"]})
-    assert not h.trader.paid
+    known = {("P", "p-1"): (1.0, True)}  # Polymarket's NO lost, and is paid out (nothing)
+    lookup = _results(h.trader, known)
+    h.trader.settle(lookup, set())
+    # Kalshi's YES won: it will pay $1 a contract, not its 45c cost.
+    assert h.trader.tied == {"K": pytest.approx(10.0), "P": 0.0}
+    assert h.trader.stake_cap() == pytest.approx(h.cfg.live_max_stake_frac * (h.trader.cash["K"] + h.trader.cash["P"]
+                                                                            + 10.0))
+    # Kalshi determines its result, and pays it out a while later: the $10 counts until then.
+    known[("K", "K-1")] = (1.0, False)
+    h.trader.account_stale = False
+    assert h.trader.settle(lookup, set()) == 1
+    assert h.trader.tied == {"K": pytest.approx(10.0), "P": 0.0} and list(h.trader.unpaid) == [t["id"]]
+    assert h.trader.markets("K") == {"K-1"} and h.trader.markets("P") == {"p-1"}
+    h.trader.account_stale = False
+    h.trader.settle(lookup, set())
+    assert not h.trader.account_stale  # nothing new paid out
+    known[("K", "K-1")] = (1.0, True)
+    h.trader.settle(lookup, set())
+    assert h.trader.tied == {"K": 0.0, "P": 0.0} and not h.trader.unpaid and h.trader.account_stale
+    assert h.trader.markets("K") == set()
+
+
+def test_a_void_says_nothing_of_the_other_leg(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    t = h.trade()
+    _results(h.trader, {("P", "p-1"): (0.5, True)})  # Polymarket voided its market at 50c
+    h.trader.settle(lambda keys: {}, set())
+    assert h.trader.tied == {"K": pytest.approx(t["k_out"]), "P": 0.0}  # Kalshi's leg: still at cost
+
+
+def test_a_payout_still_to_come_counts_after_a_restart(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    t = h.trade()
+    known = {("K", "K-1"): (1.0, False), ("P", "p-1"): (1.0, True)}
+    h.trader.settle(_results(h.trader, known), set())
+    assert h.trades()[-1]["status"] == "settled"
+    trader = h.new_trader(outcomes=lambda keys: {k: known[k] for k in keys if k in known})
+    assert list(trader.unpaid) == [t["id"]] and trader.tied == {"K": pytest.approx(10.0), "P": 0.0}
+    lookup = _results(trader, known)
+    known[("K", "K-1")] = (1.0, True)
+    trader.settle(lookup, set())
+    assert trader.tied == {"K": 0.0, "P": 0.0} and not trader.unpaid
 
 
 def test_the_account_holds_exactly_what_the_venues_hold(tmp_path):

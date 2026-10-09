@@ -254,6 +254,16 @@ def test_live_scanner_prices_on_every_update(tmp_path):
     sc.out.close()
 
 
+def test_lifecycle_events_for_the_live_accounts_markets_come_through():
+    seen = []
+    feed = KalshiFeed("ws://unused", KalshiSigner("kid", rsa_pem()), lambda t: None, seen.append)
+    feed.set_markets(["A"])
+    feed.also = {"HELD"}  # a market the live account holds, its pair no longer watched
+    for t in ("A", "HELD", "OTHER"):
+        feed._handle({"type": "market_lifecycle_v2", "msg": {"market_ticker": t, "event_type": "settled"}}, 0.0)
+    assert [m["market_ticker"] for m in seen] == ["A", "HELD"]
+
+
 def test_a_market_left_out_of_a_reply_isnt_retired(tmp_path):
     # 2026-10-01 06:16: a throttled metadata refresh retired ~5,000 pairs whose markets
     # were open on both venues. Only a venue saying a market is closed retires a pair.

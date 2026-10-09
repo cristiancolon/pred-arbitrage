@@ -34,6 +34,11 @@ function StatusPill({ enabled, account }) {
   return html`<span class="pill on"><span class="dot good pulse"></span>Live · watching</span>`;
 }
 
+// What "in open trades" counts (livetrade.py): what the trades will bring in until the venues pay them out.
+const HELD_TITLE = "Each leg at cost until its market has a result, then at what it pays. A leg whose market has no "
+  + "result yet counts at what its other leg's result leaves it. Settled trades count here until the venues have "
+  + "paid them out; a leg paid out is in the cash.";
+
 const MOVE = { deposit: "deposit", advance: "deposit advance", withdrawal: "withdrawal", bonus: "bonus",
   trade: "trade", payout: "payout" };
 
@@ -61,8 +66,8 @@ function Hero({ data, enabled, a }) {
       <div class="hero-value num">${money(bankroll)}</div>
       <div class="hero-sub">
         <span><i class="sw k"></i>Cash ${money(cash)}</span>
-        <span><i class="sw t"></i>In open trades ${money(tied)} <span class="muted">at cost</span></span>
-        ${start != null && html`<span title="The venues' real balances when live trading started, and what trading has changed since (open trades at cost), not counting your own money moves">
+        <span title=${HELD_TITLE}><i class="sw t"></i>In open trades ${money(tied)} <span class="muted">at cost or payout</span></span>
+        ${start != null && html`<span title="The venues' real balances when live trading started, and what trading has changed since (open trades at cost or payout), not counting your own money moves">
           Started at ${money(start)} <span class=${tone(change)}>${signed(change)}</span></span>`}
         ${start != null && a.own && (Math.abs(own) >= 0.005 || a.own.errors) && html`<span class="muted" title=${ownTitle(a.own)}>
           Your own money moves ${signed(own)}</span>`}
@@ -127,7 +132,7 @@ function Holdings({ cash, tied }) {
     <div class="shard-top"><span>${name}</span><b class="num">${money(v)}</b></div>
     <div class=${`bar ${cls}`}><span style=${`width:${((100 * v) / total).toFixed(1)}%`}></span></div>
   </div>`;
-  return html`<div class="shards">${row("Free to trade", cash, "p")}${row("In open trades, at cost", tied || 0, "t")}</div>`;
+  return html`<div class="shards">${row("Free to trade", cash, "p")}${row("In open trades", tied || 0, "t")}</div>`;
 }
 
 function CapCard({ a }) {
@@ -282,7 +287,7 @@ export function Trading() {
         sub="Kalshi / Polymarket US, median of the latest real orders">
         <${Split} k=${`p90 ${ms(lat?.K?.p90_ms)} ms`} p=${`p90 ${ms(lat?.P?.p90_ms)} ms`} />
       <//>
-      <${Metric} label="Open trades" value=${int(a?.open)} sub=${a ? `${money(a.tied.K + a.tied.P)} at cost · ${signed(a.locked)} locked in` : "—"} />
+      <${Metric} label="Open trades" value=${int(a?.open)} sub=${a ? `${money(a.tied.K + a.tied.P)} held · ${signed(a.locked)} locked in` : "—"} />
       <${Metric} label="Today" value=${int(data?.today?.trades)} unit=${` trade${data?.today?.trades === 1 ? "" : "s"}`}
         sub=${html`<span class=${tone(data?.today?.pnl)}>${signed(data?.today?.pnl)}</span> settled today`} />
     </div>

@@ -15,7 +15,8 @@ from arbscan import livetrade, moves
 from arbscan.config import Config
 from arbscan.latency import LatencyModel
 from arbscan.livetrade import Journal, LiveRun
-from arbscan.moves import Move, Moves, kalshi_cash, kalshi_markets, pm_cash, pm_markets
+from arbscan.moves import Move, Moves, Payout, kalshi_cash, kalshi_markets, kalshi_payouts, pm_cash, pm_markets, \
+    pm_payouts
 from arbscan.orders import KalshiTrading, Order, PMTrading
 from arbscan.scanner import KMeta
 from arbscan.store import connect
@@ -68,9 +69,12 @@ def ptrade(tid, slug, ts, intent, shares, yes_px, fee, aggressor=True, state="TR
         "aggressorExecution": mine if aggressor else theirs, "passiveExecution": theirs if aggressor else mine}}
 
 
-def presolve(slug, ts, cash_value):
+def presolve(slug, ts, cash_value, held=None):
+    before = {"cashValue": {"value": str(cash_value)}}
+    if held is not None:  # + YES, - NO contracts
+        before |= {"netPosition": f"{held:g}", "netPositionDecimal": f"{held:.4f}"}
     return {"type": moves.PM_RESOLUTION, "positionResolution": {
-        "marketSlug": slug, "updateTime": iso(ts), "beforePosition": {"cashValue": {"value": str(cash_value)}},
+        "marketSlug": slug, "updateTime": iso(ts), "beforePosition": before,
         "afterPosition": {"cashValue": {"value": "0"}}}}
 
 
@@ -206,6 +210,37 @@ def test_polymarket_trades_and_resolutions_outside_the_traders_markets():
     assert [m.kind for m in got][-1] == "payout"
 
 
+# --- what the venues paid the trader -------------------------------------------------------
+
+def test_what_kalshi_paid_the_trader_per_yes_contract():
+    t0 = SINCE + 100
+    void = ksettle("K-QAT", t0, no_count=31, revenue_cents=1550) | {"market_result": "scalar", "value": 50}
+    # 2 YES and 5 NO held: 2 pairs were netted at $1 before, and the revenue is the 3 NO left.
+    netted = ksettle("K-NET", t0, yes_count=2, no_count=5, revenue_cents=300) | {"market_result": "no", "value": 0}
+    old = ksettle("K-OLD", t0, yes_count=4, revenue_cents=400)  # no value given: the result says
+    got = kalshi_payouts([void, netted, old, ksettle("K-OWN", t0, yes_count=1, revenue_cents=100)],
+                         lambda m: m != "K-OWN")
+    assert got == [Payout("K:settlement:K-QAT", "K", "K-QAT", t0, 15.5, 0.5),
+                   Payout("K:settlement:K-NET", "K", "K-NET", t0, 3.0, 0.0),
+                   Payout("K:settlement:K-OLD", "K", "K-OLD", t0, 4.0, 1.0)]
+
+
+def test_what_polymarket_paid_the_trader_per_yes_contract():
+    t0 = SINCE + 100
+    got = pm_payouts([
+        presolve("p-qat", t0, 15.5, held=-31),  # 31 NO paid 50c each: a void
+        presolve("p-won", t0, 10, held=10),  # 10 YES won
+        presolve("p-no-won", t0, 8, held=-8),  # 8 NO won: YES paid nothing
+        presolve("p-lost", t0, 0, held=-8),  # 8 NO lost
+        presolve("p-none", t0, 0, held=0),  # nothing held: says nothing
+        presolve("p-own", t0, 6, held=6),  # yours
+        ptrade("t", "p-won", t0 - 50, "ORDER_INTENT_BUY_LONG", 10, 0.40, 0.10),
+    ], lambda m: m != "p-own")
+    assert [(p.market, p.amount, p.yes) for p in got] == [
+        ("p-qat", 15.5, 0.5), ("p-won", 10.0, 1.0), ("p-no-won", 8.0, 0.0), ("p-lost", 0.0, 1.0), ("p-none", 0.0, None)]
+    assert got[0] == Payout(f"P:resolution:p-qat:{iso(t0)}", "P", "p-qat", t0, 15.5, 0.5)
+
+
 # --- reading the ledgers -----------------------------------------------------------------
 
 class Ledger:
@@ -300,6 +335,49 @@ def test_the_ledgers_are_read_into_your_own_moves_once_and_kept(tmp_path):
     assert again.snapshot(None) is None
     # Counted from when live trading started: a later start leaves out what came before it.
     assert m.total(now - 420)["K"] == pytest.approx(40 * 0.92 - 0.20)
+
+
+def test_what_the_venues_paid_the_trader_is_kept_and_handed_on_once(tmp_path):
+    now = time.time()
+    led = _ledger(now)
+    led.k["settlements"][0] |= {"value": 100}
+    led.p.append(presolve("p-bot", now - 90, 10, held=-10))
+    db = _db(tmp_path)
+    ours = lambda m: m in ("K-BOT", "p-bot")  # noqa: E731
+    m = Moves(db, db, ours)
+    k, p = led.venues()
+    asyncio.run(m.refresh(k, p, SINCE))
+    fresh = m.take_fresh()
+    assert {(x.venue, x.market, x.amount, x.yes) for x in fresh} == {("K", "K-BOT", 10.0, 1.0),
+                                                                     ("P", "p-bot", 10.0, 0.0)}
+    assert m.take_fresh() == []
+    assert m.total(SINCE) == {"K": pytest.approx(OWN["K"]), "P": pytest.approx(OWN["P"])}  # not your own moves
+    asyncio.run(m.refresh(k, p, SINCE))
+    assert m.take_fresh() == []  # read again: nothing new
+    again = Moves(db, db, ours)
+    assert again.payouts == m.payouts and again.fresh == [] and again.read_to == m.read_to
+
+
+def test_the_first_read_to_keep_payouts_goes_back_to_the_start(tmp_path):
+    now = time.time()
+    led = _ledger(now)
+    db = _db(tmp_path)
+    # Your own moves were read up to a minute ago, before payouts were kept.
+    db.execute("INSERT INTO settings VALUES ('live_moves_read', ?)", (json.dumps({"K": now - 60, "P": now - 60}),))
+    db.commit()
+    led.p.append(presolve("p-bot", now - 3 * DAY, 10, held=-10))
+    m = Moves(db, db, lambda x: x in ("K-BOT", "p-bot"))
+    assert m.read_to == {} and not m.payouts_read
+    k, p = led.venues()
+    asyncio.run(m.refresh(k, p, now - 4 * DAY))
+    assert {x.market for x in m.take_fresh()} == {"K-BOT", "p-bot"} and m.payouts_read
+    assert Moves(db, db, NOT_OURS).read_to == m.read_to  # from then on, from where the last read got to
+    # One venue down: read from the start again next time.
+    db2 = _db(tmp_path / "b")
+    led.down = {"P"}
+    m2 = Moves(db2, db2, lambda x: x in ("K-BOT", "p-bot"))
+    asyncio.run(m2.refresh(k, p, now - 4 * DAY))
+    assert not m2.payouts_read and Moves(db2, db2, NOT_OURS).read_to == {}
 
 
 def test_a_later_read_goes_back_only_a_little_past_the_last_one(tmp_path):

@@ -94,6 +94,13 @@ stake cap), until the venues have paid them into cash:
 - a leg paid out counts nothing: its money is in the cash.
 The results come from results.py, which reads these markets every ``RECHECK_LIVE_S``
 until they're paid out, and from Kalshi's lifecycle events.
+
+**What the venues paid** comes first: once a venue's ledger shows it paying out a leg
+(moves.py, read every ``moves.EVERY_S``), the leg settles at that, and a trade already
+settled at something else is put right (``true_up``), its P&L and today's with it. A
+market's result can change after it first shows one: on 2026-10-12 Polymarket US
+showed Qatar beating Mongolia from 05:10 EDT, then paid the match out at 50c a contract
+at 09:39, as Kalshi did; the trade settled at $15.63 instead of the 13c it made.
 """
 
 import asyncio
@@ -145,6 +152,7 @@ DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sun
 CASH_MARGIN = 0.10  # leave this much of a venue's real cash unspent (fees round up)
 TICK = 0.01  # orders the trader prices itself go on whole cents, a valid price on every market
 DUST = 0.005  # contracts: less than this held is nothing held
+TRUE_UP_MIN = 0.005  # $: a payout the ledger puts further than this from the records is put right
 NAMES = {"K": "Kalshi", "P": "Polymarket US"}
 
 
@@ -518,6 +526,8 @@ class LiveTrader(PaperTrader):
         # outcomes(keys): each leg's result and whether its venue has paid it out
         # (results.outcomes); without it, a result counts as paid out once it's in.
         self.outcomes = outcomes
+        self.db = db  # read-only: settled trades for true_up
+        self.trued: dict[str, dict] = {}  # trades true_up put right, as written (the writer may not be done)
         self.paid: set[tuple[str, str]] = set()  # (trade, venue): legs the venue has paid into its cash
         # Trades settled lately that a venue may not have paid out yet: trade id -> row.
         self.unpaid: dict[str, dict] = {r["id"]: dict(r) for r in db.execute(
@@ -942,14 +952,61 @@ class LiveTrader(PaperTrader):
 
     def settle(self, lookup, finished: set[str]) -> int:
         before = dict(self.open)
-        n = super().settle(lookup, finished)
+        outcomes = self.outcomes or (lambda keys: {k: (y, True) for k, y in lookup(keys).items()})
+        # At what the venues paid, where their ledgers say (results.outcomes).
+        n = super().settle(lambda keys: {k: yes for k, (yes, _) in outcomes(keys).items()}, finished)
         for tid, t in before.items():
             if tid not in self.open:
                 self.guard.record_pnl((t["pnl"] or 0.0) + early_loss(t))  # what wasn't counted already
                 self.unpaid[tid] = t  # its payouts count until the venues have paid them
-        outcomes = self.outcomes or (lambda keys: {k: (y, True) for k, y in lookup(keys).items()})
         if self._value(outcomes) or n:
             self.account_stale = True  # read what the venues actually paid out
+        return n
+
+    def true_up(self, payouts) -> int:
+        """Put settled trades right to what the venues' ledgers say they paid
+        (``moves.Payout``; see the module docstring), with the account's P&L and today's.
+        Safe to repeat. Returns how many legs it changed."""
+        paid = {}
+        for p in sorted(payouts, key=lambda p: p.ts):
+            if p.yes is not None:
+                paid[(p.venue, p.market)] = p.yes
+        if not paid:
+            return 0
+        # The records, without their books (a row is read whole only to be written back).
+        records = {r["id"]: dict(r) for r in self.db.execute(
+            f"SELECT id, pair, k_side, p_side, k_hold, p_hold, payout_k, payout_p, pnl, settled_ts FROM {self.table} "
+            f"WHERE status = 'settled'") if any(key in paid for key in _legs(r))}
+        live = {tid: t for tid, t in self.trued.items() if tid in records}
+        live.update({tid: t for tid, t in self.unpaid.items() if any(key in paid for key in _legs(t))})
+        midnight = datetime.combine(date.today(), datetime.min.time()).timestamp()
+        n = 0
+        for tid, t in {**records, **live}.items():
+            wrong = {}  # venue -> what it paid
+            for v, market in _legs(t):
+                if (v, market) in paid:
+                    x = v.lower()
+                    pay = (t[f"{x}_hold"] or 0.0) * _pays(t[f"{x}_side"], paid[(v, market)])
+                    if abs(pay - (t[f"payout_{x}"] or 0.0)) >= TRUE_UP_MIN:
+                        wrong[v] = pay
+            if not wrong:
+                continue
+            if tid not in live:
+                t = dict(self.db.execute(f"SELECT * FROM {self.table} WHERE id = ?", (tid,)).fetchone())
+            for v, pay in wrong.items():
+                col = f"payout_{v.lower()}"
+                diff = pay - (t[col] or 0.0)
+                log.warning("live %s: %s paid $%.2f, not the $%.2f recorded; P&L %+.2f -> %+.2f", t["pair"],
+                            NAMES[v], pay, t[col] or 0.0, t["pnl"] or 0.0, (t["pnl"] or 0.0) + diff)
+                t[col], t["pnl"] = pay, (t["pnl"] or 0.0) + diff
+                self.realized += diff
+                if (t["settled_ts"] or 0.0) >= midnight:
+                    self.guard.record_pnl(diff)
+                n += 1
+            self.trued[tid] = t
+            self._write(t)
+        if n:
+            self.out.commit()
         return n
 
     def _value(self, outcomes) -> bool:
@@ -1028,8 +1085,10 @@ class LiveRun:
         self.shards = Rebalancer(kalshi, self.guard, self.trader, kmeta) if cfg.live_shard_rebalance else None
         if self.shards is not None:
             self.guard.on_short = self.shards.ran_short
-        # Your own deposits, withdrawals and trades, read from the venues' ledgers (moves.py).
+        # Your own deposits, withdrawals and trades, read from the venues' ledgers (moves.py),
+        # and what they paid the trader: its records are put right to that.
         self.moves = moves.Moves(db, out, self._ours, idle=lambda: not self.trader.busy)
+        self.trader.true_up(list(self.moves.payouts.values()))
         self.traded: set[str] = set()  # markets in the live trades and real orders on record
         self.journal.markets()
         self.ledger_http = None  # the ledger reads' own connections, opened by run()
@@ -1061,7 +1120,8 @@ class LiveRun:
             db.close()
 
     async def read_moves(self) -> None:
-        """Read your own money moves since live trading started (moves.py)."""
+        """Read your own money moves since live trading started (moves.py), and put the
+        trades right to what the venues paid."""
         try:
             self.traded = await asyncio.to_thread(self._read_traded)
             if self.ledger_http is None:  # kept alive from one read to the next (moves.EVERY_S)
@@ -1070,6 +1130,10 @@ class LiveRun:
                                      PMTrading(self.ledger_http, self.pm.base, self.pm.signer), self._since())
         except Exception as e:
             log.warning("live: reading your own money moves failed: %s", e)
+        try:
+            self.trader.true_up(self.moves.take_fresh())
+        except Exception as e:
+            log.warning("live: putting trades right to what the venues paid failed: %s", e)
 
     async def run(self, stop: asyncio.Event) -> None:
         """Keep the stop file, the settlement records and the account current."""

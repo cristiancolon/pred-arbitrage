@@ -262,6 +262,18 @@ CREATE TABLE IF NOT EXISTS live_moves (
     note TEXT
 );
 
+-- What the venues paid out on the live trader's own positions (moves.py), from the same
+-- ledgers: a live trade's legs settle at what was paid, whatever the market showed.
+CREATE TABLE IF NOT EXISTS live_payouts (
+    id TEXT PRIMARY KEY,            -- the ledger entry, e.g. K:settlement:<ticker>
+    venue TEXT NOT NULL,            -- K | P
+    market TEXT NOT NULL,
+    ts REAL NOT NULL,
+    amount REAL NOT NULL,           -- $ paid for the whole position
+    yes_value REAL                  -- $ that comes to per YES contract (0-1); NULL if it can't be told
+);
+CREATE INDEX IF NOT EXISTS live_payouts_market ON live_payouts (venue, market);
+
 -- How each market we've paired settled (results.py): what one YES contract paid.
 CREATE TABLE IF NOT EXISTS results (
     venue TEXT NOT NULL,            -- K | P

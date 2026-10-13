@@ -12,13 +12,16 @@ from pathlib import Path
 import httpx
 import pytest
 
-from arbscan import livetrade
+from arbscan import livetrade, results
 from arbscan.config import Config
 from arbscan.confirm import BookCheck
 from arbscan.fees import order_fee
+from arbscan.latency import LatencyModel
 from arbscan.livetrade import Journal, LiveGuard, LiveRun, LiveTrader
+from arbscan.moves import Payout
 from arbscan.orders import KalshiTrading, Order, PMTrading
 from arbscan.scanner import KMeta
+from arbscan.store import connect
 
 from test_paper import DAY, PAIR, Harness, kbook, pbook
 
@@ -602,6 +605,110 @@ def test_a_payout_still_to_come_counts_after_a_restart(tmp_path):
     known[("K", "K-1")] = (1.0, True)
     trader.settle(lookup, set())
     assert trader.tied == {"K": 0.0, "P": 0.0} and not trader.unpaid
+
+
+def _paid(db, venue, market, yes, ts=None):
+    """The account's ledger shows ``venue`` paying out its position in ``market`` (moves.py)."""
+    ts = time.time() if ts is None else ts
+    db.execute("INSERT OR REPLACE INTO live_payouts (id, venue, market, ts, amount, yes_value) "
+               "VALUES (?, ?, ?, ?, 0, ?)", (f"{venue}:{market}:{ts}", venue, market, ts, yes))
+    db.commit()
+    return Payout(f"{venue}:{market}:{ts}", venue, market, ts, 0.0, yes)
+
+
+def _shown(db, venue, market, yes, status):
+    db.executemany(results.UPSERT, [results._row(venue, market, status, yes, None, None, None, time.time(), {})])
+    db.commit()
+
+
+def test_a_trade_settles_at_what_the_venues_paid_not_what_the_market_showed(tmp_path):
+    """2026-10-12: Polymarket US showed Qatar beating Mongolia, then paid the match out
+    at 50c a contract (no result), as Kalshi did."""
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    t = h.trade()  # YES on Kalshi at 45c, NO on Polymarket at 50c, 10 each
+    h.trader.outcomes = lambda keys: results.outcomes(h.db, keys)
+    _shown(h.db, "P", "p-1", 0.0, "MARKET_STATUS_RESOLVED")  # NO won, it says
+    _paid(h.db, "P", "p-1", 0.5)  # ... and paid 50c a contract
+    _shown(h.db, "K", "K-1", 0.5, "settled")
+    assert h.trader.settle(lambda keys: results.lookup(h.db, keys), set()) == 1
+    got = h.trades()[-1]
+    assert (got["payout_k"], got["payout_p"]) == (pytest.approx(5.0), pytest.approx(5.0))
+    assert got["pnl"] == pytest.approx(t["locked_profit"]) and h.guard.pnl_today == pytest.approx(t["locked_profit"])
+
+
+def test_a_trade_settled_at_a_result_the_venue_didnt_pay_is_put_right(tmp_path):
+    h = LiveHarness(tmp_path, live_lead_venue="K")
+    h.market()
+    t = h.trade()
+    h.trader.outcomes = lambda keys: results.outcomes(h.db, keys)
+    _shown(h.db, "P", "p-1", 0.0, "MARKET_STATUS_RESOLVED")  # NO won, it says: $10 for the NO
+    _shown(h.db, "K", "K-1", 0.5, "settled")  # Kalshi: no result, 50c a contract
+    h.trader.settle(lambda keys: results.lookup(h.db, keys), set())
+    wrong = h.trades()[-1]
+    assert wrong["payout_p"] == pytest.approx(10.0) and wrong["pnl"] == pytest.approx(t["locked_profit"] + 5.0)
+    realized, today = h.trader.realized, h.guard.pnl_today
+    # Polymarket's ledger: it paid the NO out at 50c, not $1.
+    paid = [_paid(h.db, "P", "p-1", 0.5), _paid(h.db, "K", "K-1", 0.5)]
+    assert h.trader.true_up(paid) == 1
+    got = h.trades()[-1]
+    assert got["payout_p"] == pytest.approx(5.0) and got["payout_k"] == pytest.approx(5.0)
+    assert got["pnl"] == pytest.approx(t["locked_profit"])
+    assert h.trader.realized == pytest.approx(realized - 5.0) and h.guard.pnl_today == pytest.approx(today - 5.0)
+    assert h.trader.true_up(paid) == 0  # once
+    # After a restart, from the records: nothing left to put right.
+    trader = h.new_trader(outcomes=lambda keys: results.outcomes(h.db, keys))
+    assert trader.true_up(paid) == 0 and trader.realized == pytest.approx(t["locked_profit"])
+    # A trade the venues paid out long ago is put right too, from the records.
+    h.db.execute("UPDATE live_trades SET payout_p = 10, pnl = pnl + 5, settled_ts = 1 WHERE id = ?", (t["id"],))
+    h.db.commit()
+    trader = h.new_trader(outcomes=lambda keys: results.outcomes(h.db, keys))
+    assert not trader.unpaid and trader.true_up(paid) == 1
+    assert h.trades()[-1]["pnl"] == pytest.approx(t["locked_profit"]) and trader.guard.pnl_today == 0.0  # not today's
+
+
+def test_the_live_run_puts_trades_right_to_what_the_ledgers_say_was_paid(tmp_path):
+    from test_moves import Ledger, ksettle, presolve
+    now = time.time()
+    led = Ledger()
+    led.k["settlements"] = [ksettle("K-1", now - 300, yes_count=10, revenue_cents=500) | {"value": 50}]
+    led.p = [presolve("p-1", now - 200, 5.0, held=-10)]
+    cfg = Config(db_path=str(tmp_path / "l.db"), live_trading=True, live_shard_rebalance=False)
+    db = connect(cfg.db_path)
+    start = {"K": 100.0, "P": 100.0, "ts": now - DAY}
+    db.execute("INSERT INTO settings VALUES ('live_start', ?)", (json.dumps(start),))
+    # Settled on what Polymarket first showed: its NO won.
+    db.execute("INSERT INTO live_trades (id, ts, pair, direction, k_side, p_side, planned_size, k_hold, p_hold, k_out, "
+               "p_out, locked_profit, status, settled_ts, payout_k, payout_p, pnl) VALUES ('t1', ?, 'K-1|p-1', "
+               "'K:YES+P:NO', 'yes', 'no', 10, 10, 10, 4.6, 5.2, 0.2, 'settled', ?, 5.0, 10.0, 5.2)",
+               (now - 3600, now - 1800))
+    db.commit()
+    ex = Exchange()
+    trading = httpx.AsyncClient(transport=httpx.MockTransport(ex.handler))
+    run = LiveRun(cfg, db, db, LatencyModel(), {}, {}, {"K-1": KMeta("active", time.time() + DAY, 0.07)},
+                  KalshiTrading(trading, K_BASE, SIGNER), PMTrading(trading, P_BASE, SIGNER))
+    assert run.trader.realized == pytest.approx(5.2)
+    run.ledger_http = httpx.AsyncClient(transport=httpx.MockTransport(led.handler))
+
+    async def go():
+        stop = asyncio.Event()
+        task = asyncio.create_task(run.run(stop))
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.moves.read_ts is not None and not run.moves.fresh:
+                break
+        stop.set()
+        await task
+
+    asyncio.run(go())
+    t = dict(db.execute("SELECT * FROM live_trades WHERE id = 't1'").fetchone())
+    assert (t["payout_k"], t["payout_p"], t["pnl"]) == (pytest.approx(5.0), pytest.approx(5.0), pytest.approx(0.2))
+    assert run.trader.realized == pytest.approx(0.2)
+    # A restart: the payouts are kept, and the trade stays put right.
+    again = LiveRun(cfg, db, db, LatencyModel(), {}, {}, {}, KalshiTrading(trading, K_BASE, SIGNER),
+                    PMTrading(trading, P_BASE, SIGNER))
+    assert again.trader.realized == pytest.approx(0.2) and len(again.moves.payouts) == 2
+    asyncio.run(trading.aclose())
 
 
 def test_the_account_holds_exactly_what_the_venues_hold(tmp_path):

@@ -30,6 +30,16 @@ Left in the change, since the account earned them: Kalshi's interest (no API sho
 it), fee rebates and liquidity rewards. A Polymarket transfer doesn't say which way it
 went: it's logged, not counted.
 
+**What the venues paid on the live trader's own positions** comes from the same
+reads, and is kept apart in ``live_payouts`` (``Payout``): a Kalshi settlement's
+``value`` (cents per YES contract; its revenue leaves out pairs of YES and NO netted
+before it), a Polymarket US resolution's ``cashValue`` over the position it closed. A
+live trade's legs settle at what was paid (results.outcomes, LiveTrader.true_up), not
+at what the market showed: on 2026-10-12 Polymarket US showed Qatar beating Mongolia
+from 05:10 EDT, then settled the match at 50c a contract at 09:39 as Kalshi did, and
+the trade had been counted at $31 for a Polymarket leg that paid $15.50. The first read
+to keep them goes back to when live trading started, whatever was read before.
+
 The ledgers are read on their own HTTP connections, never the order client's (an order
 would wait for a fresh TLS handshake if a read held its warm connection), kept alive
 between reads (a handshake with Kalshi holds up the event loop ~30 ms; a request on a
@@ -84,6 +94,17 @@ class Move:
     amount: float  # what it moved the venue's cash by: + in, - out
     market: str | None = None
     note: str | None = None
+
+
+@dataclass
+class Payout:
+    """A venue paying out the live trader's position in one of its markets."""
+    id: str  # the ledger entry, e.g. K:settlement:<ticker>
+    venue: str
+    market: str
+    ts: float
+    amount: float  # $ paid for the whole position
+    yes: float | None  # what that comes to per YES contract (0-1), None if it can't be told
 
 
 def _iso(text) -> float | None:
@@ -242,6 +263,46 @@ def pm_markets(activities: list[dict], ours: Callable[[str], bool]) -> list[Move
     return out
 
 
+# --- what the venues paid the live trader ------------------------------------------------
+
+def kalshi_payouts(settlements: list[dict], ours: Callable[[str], bool]) -> list[Payout]:
+    """Kalshi settlements in the trader's markets: ``value`` is what one YES contract paid,
+    in cents (a contract pair netted before it was paid out then, at $1)."""
+    out = []
+    for s in settlements:
+        ticker = s["ticker"]
+        if not ours(ticker):
+            continue
+        value = s.get("value")
+        yes = value / 100 if value is not None else {"yes": 1.0, "no": 0.0}.get(s.get("market_result") or "")
+        out.append(Payout(f"K:settlement:{ticker}", "K", ticker, _iso(s.get("settled_time")) or 0.0,
+                          (s.get("revenue") or 0) / 100, yes))
+    return out
+
+
+def pm_payouts(activities: list[dict], ours: Callable[[str], bool]) -> list[Payout]:
+    """Polymarket US resolutions in the trader's markets: what the position closed (+ YES,
+    - NO contracts) was paid."""
+    out = []
+    for a in activities:
+        if a["type"] != PM_RESOLUTION:
+            continue
+        r = a["positionResolution"]
+        slug = r.get("marketSlug")
+        if not ours(slug):
+            continue
+        before = r.get("beforePosition") or {}
+        held = float(before.get("netPositionDecimal") or before.get("netPosition") or 0)
+        paid = _value(before.get("cashValue"))
+        yes = None
+        if abs(held) >= 1e-6:
+            each = paid / abs(held)
+            yes = min(1.0, max(0.0, round(each if held > 0 else 1.0 - each, 6)))
+        out.append(Payout(f"P:resolution:{slug}:{r.get('updateTime')}", "P", slug, _iso(r.get("updateTime")) or 0.0,
+                          paid, yes))
+    return out
+
+
 def _activity_ts(a: dict) -> float:
     if a.get("trade"):
         return _iso(a["trade"].get("createTime")) or 0.0
@@ -280,18 +341,29 @@ async def _pm_pages(turn, p: PMTrading, types: list[str], until: float | None = 
 
 
 class Moves:
-    """Your own money moves since live trading started, kept in ``live_moves``.
-    ``ours(market)``: the live trader has sent an order in that market. ``idle()``: no
-    trade is in flight, so a ledger request may go."""
+    """Your own money moves since live trading started, kept in ``live_moves``, and what
+    the venues paid the live trader, in ``live_payouts``. ``ours(market)``: the live
+    trader has sent an order in that market. ``idle()``: no trade is in flight, so a
+    ledger request may go."""
 
     def __init__(self, db, out, ours: Callable[[str], bool], idle: Callable[[], bool] = lambda: True):
         self.out, self.ours, self.idle = out, ours, idle
         self.moves: dict[str, Move] = {r[0]: Move(*r) for r in db.execute(
             "SELECT id, venue, ts, kind, amount, market, note FROM live_moves")}
+        self.payouts: dict[str, Payout] = {r[0]: Payout(*r) for r in db.execute(
+            "SELECT id, venue, market, ts, amount, yes_value FROM live_payouts")}
+        self.fresh: list[Payout] = []  # payouts new or changed since the last take_fresh()
         row = db.execute("SELECT value FROM settings WHERE key = 'live_moves_read'").fetchone()
-        self.read_to: dict[str, float] = json.loads(row[0]) if row else {}  # venue -> ledger read up to here
+        # Until one read has gone all the way through with payouts kept, read from the start.
+        self.payouts_read = db.execute("SELECT 1 FROM settings WHERE key = 'live_payouts_read'").fetchone() is not None
+        # venue -> ledger read up to here
+        self.read_to: dict[str, float] = json.loads(row[0]) if row and self.payouts_read else {}
         self.read_ts: float | None = None  # the last read that went through, both venues
         self.errors: dict[str, str] = {}
+
+    def take_fresh(self) -> list[Payout]:
+        fresh, self.fresh = self.fresh, []
+        return fresh
 
     def total(self, since: float) -> dict[str, float]:
         out = {"K": 0.0, "P": 0.0}
@@ -333,6 +405,10 @@ class Moves:
             self.out.commit()
         if ok:
             self.read_ts = time.time()
+            if not self.payouts_read:
+                self.payouts_read = True
+                self.out.execute("INSERT OR REPLACE INTO settings VALUES ('live_payouts_read', '1')")
+                self.out.commit()
 
     async def _turn(self) -> None:
         """Wait for the next ledger request's turn: ``PAUSE_S`` after the last, with no trade in flight."""
@@ -360,6 +436,7 @@ class Moves:
         fills = [f for f in fills if f["ticker"] not in moving and float(f["ts"]) >= since]
         settled = [s for s in settled if s["ticker"] not in moving and (_iso(s.get("settled_time")) or 0) >= since]
         self._keep(cash + kalshi_markets(fills, settled, after, self.ours))
+        self._keep_payouts(kalshi_payouts(settled, self.ours))
         return not moving
 
     async def _kalshi_window(self, k: KalshiTrading, start: float) -> tuple[list[dict], list[dict]]:
@@ -371,6 +448,7 @@ class Moves:
         cash = pm_cash(await _pm_pages(self._turn, p, PM_CASH_TYPES), since)
         markets = [a for a in await _pm_pages(self._turn, p, PM_MARKET_TYPES, until=start) if _activity_ts(a) >= since]
         self._keep(cash + pm_markets(markets, self.ours))
+        self._keep_payouts(pm_payouts(markets, self.ours))
         return True
 
     def _keep(self, moves: list[Move]) -> None:
@@ -386,6 +464,21 @@ class Moves:
             self.out.execute("INSERT OR REPLACE INTO live_moves (id, venue, ts, kind, amount, market, note) "
                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
                              (m.id, m.venue, m.ts, m.kind, m.amount, m.market, m.note))
+            changed = True
+        if changed:
+            self.out.commit()
+
+    def _keep_payouts(self, payouts: list[Payout]) -> None:
+        """Store what's new or changed, and hand it on (``take_fresh``)."""
+        changed = False
+        for p in payouts:
+            p.amount = round(p.amount, 6)
+            if self.payouts.get(p.id) == p:
+                continue
+            self.payouts[p.id] = p
+            self.fresh.append(p)
+            self.out.execute("INSERT OR REPLACE INTO live_payouts (id, venue, market, ts, amount, yes_value) "
+                             "VALUES (?, ?, ?, ?, ?, ?)", (p.id, p.venue, p.market, p.ts, p.amount, p.yes))
             changed = True
         if changed:
             self.out.commit()

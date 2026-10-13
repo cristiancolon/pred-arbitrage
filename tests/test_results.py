@@ -82,19 +82,55 @@ def test_the_live_accounts_markets_are_read_until_paid_out(tmp_path):
         # Kalshi's close time is two weeks off and the scanner knows nothing of the pair.
         results._row("K", "K-5", "inactive", None, None, NOW + 14 * 86400, None, NOW - results.RECHECK_LIVE_S, {}),
         results._row("P", "p-5", "MARKET_STATUS_OPEN", None, None, NOW + 14 * 86400, None, NOW - 30, {}),
-        # Determined but not yet paid out: read again; Polymarket's is paid out.
+        # Determined but not yet paid out: read again. Polymarket's resolved one too, until
+        # the account's ledger shows it paid out: a result can change after it first shows.
         results._row("K", "K-6", "determined", 1.0, "yes", NOW - 7200, None, NOW - results.RECHECK_LIVE_S, {}),
         results._row("P", "p-6", "MARKET_STATUS_RESOLVED", 0.0, "No", NOW - 7200, None, NOW - 600, {}),
     ])
     due = set(results.due(db, tracked, set(), NOW))
     assert ("K", "K-5") in due and ("P", "p-5") not in due  # each every RECHECK_LIVE_S
-    assert ("K", "K-6") in due and ("P", "p-6") not in due
+    assert ("K", "K-6") in due and ("P", "p-6") in due
     db.executemany(results.UPSERT, [results._row("K", "K-6", "finalized", 1.0, "yes", NOW - 7200, None, NOW - 600, {})])
     assert ("K", "K-6") not in set(results.due(db, tracked, set(), NOW))  # paid out: once a day from now on
+    _payout(db, "P", "p-6", NOW - 300, 0.0)  # paid out at the result shown: no more looks either
+    assert ("P", "p-6") not in set(results.due(db, tracked, set(), NOW))
     assert results.outcomes(db, {("K", "K-5"), ("K", "K-6"), ("P", "p-6")}) == {
         ("K", "K-6"): (1.0, True), ("P", "p-6"): (0.0, True)}
     db.executemany(results.UPSERT, [results._row("K", "K-5", "determined", 0.0, "no", None, None, NOW, {})])
     assert results.outcomes(db, {("K", "K-5")}) == {("K", "K-5"): (0.0, False)}
+
+
+def _payout(db, venue, market, ts, yes, amount=0.0):
+    db.execute("INSERT INTO live_payouts (id, venue, market, ts, amount, yes_value) VALUES (?, ?, ?, ?, ?, ?)",
+               (f"{venue}:{market}:{ts}", venue, market, ts, amount, yes))
+    db.commit()
+
+
+def test_what_the_ledger_says_was_paid_comes_before_the_result_shown(tmp_path):
+    """On 2026-10-12 Polymarket US showed Qatar beating Mongolia, then paid the match
+    out at 50c a contract, as Kalshi did."""
+    db = _db(tmp_path)
+    _live_trade(db, "q", "K-QAT|p-mon-qat", "settled", NOW - 3600)
+    db.execute("UPDATE live_trades SET p_hold = 0 WHERE id = 'q'")  # (a leg sold back whole is paid nothing)
+    _live_trade(db, "r", "K-R|p-r", "settled", NOW - 3600)
+    db.commit()
+    assert results.live_markets(db, NOW) == {("K", "K-QAT"), ("K", "K-R"), ("P", "p-r")}
+    db.executemany(results.UPSERT, [
+        results._row("K", "K-R", "finalized", 0.5, "scalar", NOW - 7200, None, NOW - 600, {}),
+        results._row("P", "p-r", "MARKET_STATUS_RESOLVED", 0.0, "Qatar", NOW - 7200, None, NOW - 600, {}),
+    ])
+    _payout(db, "K", "K-R", NOW - 400, 0.5, 5.0)
+    _payout(db, "P", "p-r", NOW - 500, None)  # a resolution of no position: says nothing
+    assert results.outcomes(db, {("K", "K-R"), ("P", "p-r")}) == {("K", "K-R"): (0.5, True), ("P", "p-r"): (0.0, True)}
+    assert results.ledger(db) == {("K", "K-R"): 0.5}
+    _payout(db, "P", "p-r", NOW - 300, 0.5, 5.0)
+    assert results.outcomes(db, {("P", "p-r")}) == {("P", "p-r"): (0.5, True)}
+    # The result shown disagrees with what was paid: read again until it doesn't.
+    due = set(results.due(db, results.tracked_markets(db), set(), NOW))
+    assert ("P", "p-r") in due and ("K", "K-R") not in due
+    db.executemany(results.UPSERT, [
+        results._row("P", "p-r", "MARKET_STATUS_RESOLVED", 0.5, "Mongolia", NOW - 7200, None, NOW, {})])
+    assert ("P", "p-r") not in set(results.due(db, results.tracked_markets(db), set(), NOW + results.RECHECK_LIVE_S))
 
 
 def test_recorder_and_backtest_views(tmp_path):

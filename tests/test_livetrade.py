@@ -1253,6 +1253,35 @@ def test_nothing_is_traded_while_kalshi_is_closed_or_about_to_close(tmp_path):
         assert h.guard.kalshi_closed("K-1")
 
 
+def test_a_refusal_every_pick_gets_shows_as_trading_paused(tmp_path):
+    # On 2026-10-27 the location check lapsing refused every pick for over a day, unseen.
+    h = LiveHarness(tmp_path)
+    h.market()
+    g = h.guard
+    assert g.blocked() is None
+    g.attested_until = time.time() + livetrade.ATTEST_MARGIN_S - 60  # a day less a minute left
+    assert g.blocked() == "Kalshi location check lapsing"
+    assert h.trade() is None and not h.ex.sent and h.trader.stats["Kalshi location check lapsing"] == 1
+    g.attested_until = time.time() + 7 * DAY  # renewed in Kalshi's app
+    assert g.blocked() is None and h.trade(window=2.0)["status"] == "open"
+    g.lost_today = h.cfg.live_daily_loss_usd
+    assert g.blocked() == "daily loss limit"
+    g.lost_today, g.trades_today = 0.0, h.cfg.live_max_trades_per_day
+    assert g.blocked() == "daily trade limit"
+    g.trades_today, g.k_trading_ts = 0, time.time() - 2 * livetrade.STATUS_MAX_AGE_S  # its status gone stale
+    assert g.blocked() == "Kalshi trading paused"
+
+
+def test_the_desk_is_told_why_trading_is_paused(tmp_path):
+    from test_feeds import _live
+
+    sc, _ = _live(tmp_path, live_trading=True, paper_trading=False, dry_run=False)
+    snap = sc.live.snapshot()
+    assert snap["blocked"] == "Kalshi trading paused"  # its status isn't read yet
+    assert snap["limits"]["attest_margin_s"] == livetrade.ATTEST_MARGIN_S
+    asyncio.run(sc.http.aclose())
+
+
 def test_nothing_is_traded_around_the_start_and_little_in_play(tmp_path):
     h = LiveHarness(tmp_path, live_in_play_stake_usd=2.5)
     h.market()

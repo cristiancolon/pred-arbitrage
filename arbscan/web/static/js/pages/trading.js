@@ -1,6 +1,6 @@
 // The live trading desk: the account, the per-trade cap, how orders are doing, and every trade.
 import { html } from "../vendor/preact-htm.js";
-import { ago, cents, dateTime, dirLabel, int, money, navigate, useFetch, useNow, usePref } from "../lib.js";
+import { ago, cents, dateTime, dirLabel, duration, int, money, navigate, until, useFetch, useNow, usePref } from "../lib.js";
 import { ChartCard, LineChart } from "../charts.js";
 import { Badge, Banner, Card, DataTable, Empty, Icon, PairName, RangeSeg, Seg } from "../ui.js";
 
@@ -30,6 +30,7 @@ function StatusPill({ enabled, account }) {
   if (!enabled) return html`<span class="pill off"><span class="dot"></span>Off</span>`;
   if (!account) return html`<span class="pill off"><span class="dot"></span>Starting…</span>`;
   if (account.halted) return html`<span class="pill stopped"><span class="dot critical"></span>Stopped</span>`;
+  if (account.blocked) return html`<span class="pill paused" title=${account.blocked}><span class="dot warning"></span>Paused</span>`;
   if (account.in_flight) return html`<span class="pill busy"><span class="dot accent pulse"></span>Trading now</span>`;
   return html`<span class="pill on"><span class="dot good pulse"></span>Live · watching</span>`;
 }
@@ -181,9 +182,39 @@ function TradeStatus({ t }) {
   return html`<${Badge} tone=${t.pnl >= 0 ? "good" : "critical"} icon=${t.pnl >= 0 ? "check" : "xcircle"}>Settled<//>`;
 }
 
+// The location check: trading stops attest_margin_s before it lapses, so a renewal buys this many days of it.
+function checkStop(lim) {
+  const margin = lim.attest_margin_s || 0;
+  return { margin, stop: lim.attested_until ? lim.attested_until - margin : null, span: 7 - margin / 86400 };
+}
+const RENEW = "Open the Kalshi app with location on to renew it.";
+
+// What refuses every pick for now (LiveGuard.blocked) and what lifts it, or the location check's stop
+// coming within a day, while there's still time to renew it.
+function PausedBanner({ a, now }) {
+  const lim = a.limits || {};
+  const { margin, stop } = checkStop(lim);
+  const lapse = lim.attested_until
+    ? `${lim.attested_until > now ? "lapses" : "lapsed"} ${dateTime(lim.attested_until)}` : "hasn't been read";
+  const why = {
+    "Kalshi location check lapsing": () => `the Kalshi location check ${lapse}, and trading stops ${duration(margin)} `
+      + `before it does. ${RENEW} Trading resumes by itself once Kalshi shows the new date.`,
+    "daily loss limit": () => `today's trades have lost ${money(lim.lost_today)}, the daily limit. Trading resumes at midnight.`,
+    "daily trade limit": () => `${int(lim.trades_today)} trades today, the daily limit. Trading resumes at midnight.`,
+    "Kalshi trading paused": () => "Kalshi isn't taking orders (its Thursday 03:00–05:00 ET maintenance, a halt, or its "
+      + "status not read lately). Trading resumes when it is.",
+  }[a.blocked];
+  if (a.blocked) return html`<${Banner} tone="warning"><b>Not trading:</b> ${why ? why() : a.blocked}<//>`;
+  if (stop != null && stop - now < 86400) {
+    const when = `trading stops ${until(stop, now)} (${dateTime(stop)}), ${duration(margin)} before the check lapses.`;
+    return html`<${Banner} tone="warning"><b>The Kalshi location check needs renewing:</b> ${when} ${RENEW}<//>`;
+  }
+  return null;
+}
+
 function Guardrails({ a, now }) {
   const lim = a?.limits || {};
-  const days = lim.attested_until ? (lim.attested_until - now) / 86400 : null;
+  const { margin, stop, span } = checkStop(lim);
   return html`<${Card} title="Guardrails" sub="Trading stops by itself when one of these trips">
     <div class="rails">
       <div class="rail">
@@ -195,9 +226,10 @@ function Guardrails({ a, now }) {
         <${Meter} value=${lim.trades_today || 0} max=${lim.max_trades} warnAt=${0.8} label="Trades today against the daily limit" />
       </div>
       <div class="rail">
-        <div class="rail-top"><span title="After it lapses, Kalshi takes no API orders on sports">Kalshi location check</span>
-          <span class="num">${days == null ? "not read" : days <= 0 ? "lapsed" : `${days.toFixed(1)} days left`}</span></div>
-        <${Meter} value=${days == null ? 0 : Math.max(0, 7 - days)} max=${7} warnAt=${5 / 7} label="Location check used up" />
+        <div class="rail-top"><span title=${`After it lapses Kalshi takes no API orders on sports, so trading stops ${duration(margin)} before. ${RENEW}`}>Kalshi location check</span>
+          <span class="num">${stop == null ? "not read" : stop <= now ? "trading stopped" : `trading stops ${until(stop, now)}`}</span></div>
+        <${Meter} value=${stop == null ? 0 : Math.max(0, span - (stop - now) / 86400)} max=${span} warnAt=${(span - 1) / span}
+          label="Location check used up" />
       </div>
     </div>
     <dl class="facts" style="margin-top:14px">
@@ -262,6 +294,7 @@ export function Trading() {
       in config.toml; <code>arbscan live-check</code> shows what it would start with.<//>`}
     ${a?.halted && html`<${Banner} tone="critical"><b>Stopped:</b> ${a.halted}. Check the positions on both venues, then run
       <code>arbscan live-resume</code> on the machine it runs on.<//>`}
+    ${a && !a.halted && html`<${PausedBanner} a=${a} now=${now} />`}
 
     <${Hero} data=${data} enabled=${enabled} a=${a} />
 

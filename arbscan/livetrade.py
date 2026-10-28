@@ -115,7 +115,7 @@ from zoneinfo import ZoneInfo
 
 from . import confirm, moves
 from .catalog import kalshi_start_ts
-from .dryrun import SERIES_SQL, Guard, clean_series
+from .dryrun import ATTEST_MARGIN_S, SERIES_SQL, Guard, clean_series
 from .fees import order_fee, per_contract
 from .http import make_client
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
@@ -365,6 +365,23 @@ class LiveGuard(Guard):
             shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
             self.on_short(shard, self.stake_cap() - self.shard_cash.get(shard, 0.0))
         return why
+
+    def blocked(self) -> str | None:
+        """The refusal every pick gets now, whatever its pair, short of a stop: one that
+        lifts by itself (a daily limit at midnight, Kalshi reopening, the location check
+        once it's renewed in Kalshi's app), so the dashboard can say trading is paused and
+        why. On 2026-10-27 the location check lapsing refused every pick for over a day
+        while the desk read "Live · watching"."""
+        self._roll()
+        if self.trades_today >= self.cfg.live_max_trades_per_day:
+            return "daily trade limit"
+        if self.kalshi_closed(""):
+            return "Kalshi trading paused"
+        if self.lost_today >= self.cfg.live_daily_loss_usd:
+            return "daily loss limit"
+        if self.lapsing():
+            return "Kalshi location check lapsing"
+        return None
 
     def kalshi_closed(self, ticker: str) -> bool:
         """Kalshi won't take an order in ``ticker`` now, or a trade started now could
@@ -1194,9 +1211,10 @@ class LiveRun:
         g, cfg = self.guard, self.cfg
         return {**self.trader.snapshot(), "start": self.trader.start,
                 "own": self.moves.snapshot(self._since()),
-                "halted": g.halted, "rejects": self.trader.rejects,
+                "halted": g.halted, "blocked": g.blocked(), "rejects": self.trader.rejects,
                 "limits": {"series": None if g.series is None else len(g.series), "held": len(g.held),
                            "shard_cash": g.shard_cash, "pm_cash": g.pm_cash, "attested_until": g.attested_until or None,
+                           "attest_margin_s": ATTEST_MARGIN_S,
                            "lost_today": g.lost_today, "trades_today": g.trades_today,
                            "max_trades": cfg.live_max_trades_per_day, "max_stake": self.trader.stake_cap(),
                            "max_stake_frac": cfg.live_max_stake_frac,

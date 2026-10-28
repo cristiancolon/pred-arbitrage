@@ -80,12 +80,16 @@ class Guard:
             return "account holds a position"
         if self.lost_today >= self.cfg.live_daily_loss_usd:
             return "daily loss limit"
-        if self.attested_until - time.time() < ATTEST_MARGIN_S:
+        if self.lapsing():
             return "Kalshi location check lapsing"
         shard = getattr(self.kmeta.get(pair.kalshi), "shard", 0)
         if self.shard_cash is None or self.shard_cash.get(shard, 0.0) < 1.0:
             return f"no cash on Kalshi shard {shard}"
         return None
+
+    def lapsing(self) -> bool:
+        """The Kalshi location check lapses within ``ATTEST_MARGIN_S`` (or hasn't been read)."""
+        return self.attested_until - time.time() < ATTEST_MARGIN_S
 
     def read_records(self, db_path: str, table: str) -> None:
         """Settlement records per series, and what today's settled trades lost (runs in a thread)."""

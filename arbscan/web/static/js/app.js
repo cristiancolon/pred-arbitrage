@@ -42,6 +42,7 @@ function LiveDot() {
   const live = useStore((s) => s.state?.live);
   if (!live) return html`<span class="dot" title="Live trading is off"></span>`;
   if (live.halted) return html`<span class="dot critical" title="Live trading stopped"></span>`;
+  if (live.blocked) return html`<span class="dot warning" title=${`Live trading paused: ${live.blocked}`}></span>`;
   return html`<span class="dot good pulse" title="Live trading on"></span>`;
 }
 
@@ -50,6 +51,7 @@ function LivePill() {
   if (live === undefined) return null;
   if (!live) return html`<a class="pill off" href="#/trading"><span class="dot"></span>Live trading off</a>`;
   if (live.halted) return html`<a class="pill stopped" href="#/trading" title=${live.halted}><span class="dot critical"></span>Trading stopped</a>`;
+  if (live.blocked) return html`<a class="pill paused" href="#/trading" title=${live.blocked}><span class="dot warning"></span>Trading paused</a>`;
   return html`<a class=${`pill ${live.in_flight ? "busy" : "on"}`} href="#/trading">
     <span class=${`dot ${live.in_flight ? "accent" : "good"} pulse`}></span>
     <span class="num">${money(live.bankroll)}</span>

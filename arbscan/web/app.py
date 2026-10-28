@@ -181,7 +181,7 @@ class Service:
         if lr is None:
             return None
         t = lr.trader
-        return {"halted": lr.guard.halted, "in_flight": len(t.busy), "open": len(t.open),
+        return {"halted": lr.guard.halted, "blocked": lr.guard.blocked(), "in_flight": len(t.busy), "open": len(t.open),
                 "pnl": t.realized + sum(x["locked_profit"] for x in t.open.values()),
                 "bankroll": sum(t.cash[v] + t.tied[v] for v in t.cash)}
 

@@ -209,3 +209,21 @@ def test_dry_run_rejudges_nothing(env):
     assert (stats["unpaired"], stats["paired"]) == (1, 1)
     assert [(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)] == [("K-1", "p-1")]
     assert db.execute("SELECT DISTINCT model FROM jev_reviews").fetchall()[0][0] == "jev-1.13.0"
+
+
+def test_no_write_lock_is_held_while_waiting_for_jev(env, monkeypatch):
+    # An open write transaction holds SQLite's write lock: the scanner's writer would
+    # wait behind it for as long as Jev takes to answer.
+    cfg, db = env
+    monkeypatch.setattr(jev, "CONCURRENCY", 1)  # one call at a time, each after the last verdict
+    open_while_asking = []
+
+    class Watching(ChangedMind):
+        async def post(self, path, body):
+            open_while_asking.append(db.in_transaction)
+            await asyncio.sleep(0)
+            return await super().post(path, body)
+
+    asyncio.run(jev.review(replace(cfg, jev_model="jev-1.13.0"), db, api=Watching()))
+    asyncio.run(jev.review(cfg, db, api=Watching()))  # re-judges, unpairing and pairing
+    assert len(open_while_asking) == 6 and not any(open_while_asking)

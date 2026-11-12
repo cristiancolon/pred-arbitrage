@@ -296,9 +296,9 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
         if protected({"rules": r["k_rules"]}):
             stats[_apply(cfg, db, r, h, _protected_verdict(), None, 0, dry_run)] += 1
             stats["protected"] += 1
+            db.commit()  # one short write at a time (see below)
         else:
             asks.append(item)
-    db.commit()
     if stats["protected"]:
         log.info("rejected %d Kalshi protected props without asking Jev", stats["protected"])
     todo = asks[: limit if limit is not None else cfg.jev_max_per_run]
@@ -339,13 +339,15 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
             stats["failed"] += 1
             return
         outcome = _apply(cfg, db, r, h, v, resp.get("model"), tokens, dry_run)
+        # Commit each verdict: an open write transaction holds the database's write lock,
+        # and the scanner's writer waits behind it (a re-judge of ~7,000 pairs that
+        # committed every 50 kept the writer's backlog at 50-500 for 20 minutes).
+        db.commit()
         stats["sent"] += 1
         stats[outcome] += 1
         stats["tokens"] += tokens or 0
         if dry_run:
             log.info("%-8s %s | %s (%s): %s", outcome, r["kalshi"], r["pm"], r["relation"], v.reason)
-        if stats["sent"] % 50 == 0:
-            db.commit()  # progress shows up on the dashboard as it goes
         if stats["sent"] % 250 == 0:
             log.info("%d/%d reviewed: %d approved, %d rejected, %d rejected as unsure; of those decided before, "
                      "%d unpaired, %d paired, %d kept", stats["sent"], len(todo), stats["approve"], stats["reject"],

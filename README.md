@@ -206,11 +206,13 @@ held to the limits a first, capped live run would have:
   open trades on both venues, so it grows with the account), expected to make 5¢ or more
   (`live_min_profit_usd`), and no new trade once today's trades have lost $10, net of
   today's gains, across both venues together (`live_daily_loss_usd`).
+- No Kalshi "protected" player prop (a series ending `PROT`): when the player doesn't get
+  to play, Kalshi pays a pre-kickoff fair price and Polymarket US resolves plain No.
 - No market the account already holds a position in (it may be one taken by hand).
 - No Kalshi market on an exchange shard without cash: Kalshi fills an order only from
   the cash on its market's shard, and new baseball, tennis and basketball events live
   on shard 3.
-- Nothing within a day of the Kalshi API key's location check lapsing
+- Nothing within 15 minutes of the Kalshi API key's location check lapsing
   (`GET /api_keys` → `api_key_region_expiration_ts`), after which Kalshi takes no API
   orders on sports, elections or entertainment.
 

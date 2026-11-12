@@ -9,7 +9,8 @@ limits a first live run would have:
   ``live_series_min_settled`` approved pairs, none conflicting and at most
   ``live_series_max_void`` of them voided. A mismatched pair looks like an arb, so it
   gets picked far more often than it occurs; this keeps to pairings that have
-  already settled as one bet many times.
+  already settled as one bet many times. Kalshi's protected player props (series
+  ending ``PROT``) never pass: they pay out differently when the player sits out.
 - **Stakes.** At most ``live_max_stake_frac`` of the account's money a trade (cash
   plus open trades, both venues together), both legs together, and only picks
   expected to make ``live_min_profit_usd``.
@@ -41,7 +42,13 @@ from .store import open_db
 
 log = logging.getLogger(__name__)
 
-ATTEST_MARGIN_S = 24 * 3600.0
+# Long enough for a trade begun just before it to finish, its five-minute rescue included.
+# It was a day until 2026-11-11: checks renewed late had cost about a day of trading a week.
+ATTEST_MARGIN_S = 15 * 60.0
+# Kalshi's "protected" player props (series ending PROT) settle at a pre-kickoff fair price
+# when the player doesn't get to play; Polymarket US resolves the same prop plain No. On
+# 2026-11-01 both legs of two such trades lost, and the records call it a void.
+PROTECTED_SUFFIX = "PROT"
 ACCOUNT_EVERY_S = 3600.0  # re-read positions, shard cash and the location check this often
 RECORD_EVERY_S = 600.0  # re-read the series' settlement records and today's losses
 PREVIEW_QUEUE = 50  # previews waiting at most; any more are counted as dropped
@@ -74,7 +81,10 @@ class Guard:
         self.epoch = 0  # bumped when a live trade starts, so a read taken during it isn't kept
 
     def __call__(self, pair, days) -> str | None:
-        if self.series is None or pair.kalshi.split("-")[0] not in self.series:
+        series = pair.kalshi.split("-")[0]
+        if series.endswith(PROTECTED_SUFFIX):
+            return "Kalshi protected prop"
+        if self.series is None or series not in self.series:
             return "series without a clean record"
         if pair.kalshi in self.held or pair.pm in self.held:
             return "account holds a position"

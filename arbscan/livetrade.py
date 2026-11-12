@@ -1269,7 +1269,8 @@ async def check(cfg) -> None:
     if guard.attested_until:
         lapses = datetime.fromtimestamp(guard.attested_until).isoformat(timespec="minutes")
         days = (guard.attested_until - time.time()) / 86400
-        print(f"Kalshi location check: lapses {lapses} (in {days:.1f} days; trading stops a day before)")
+        print(f"Kalshi location check: lapses {lapses} (in {days:.1f} days; "
+              f"trading stops {ATTEST_MARGIN_S / 60:g} min before)")
     else:
         print("Kalshi location check: never done")
 

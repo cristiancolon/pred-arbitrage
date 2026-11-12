@@ -4,6 +4,7 @@ orders it would send. Nothing here reaches a venue."""
 import asyncio
 import json
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -38,12 +39,17 @@ def test_the_guard_passes_nothing_until_it_has_read_the_records_and_the_account(
     assert g(PAIR, 0.5) is None
     for change, why in ((lambda g: setattr(g, "held", {"p-1"}), "account holds a position"),
                         (lambda g: setattr(g, "lost_today", g.cfg.live_daily_loss_usd), "daily loss limit"),
-                        (lambda g: setattr(g, "attested_until", time.time() + 3600), "Kalshi location check lapsing"),
+                        (lambda g: setattr(g, "attested_until", time.time() + 300), "Kalshi location check lapsing"),
                         (lambda g: setattr(g, "shard_cash", {0: 0.5, 3: 100.0}), "no cash on Kalshi shard 0"),
                         (lambda g: setattr(g, "series", {"KXNFLREC"}), "series without a clean record")):
         g = ready_guard(h.cfg, h.kmeta)
         change(g)
         assert g(PAIR, 0.5) == why
+    g = ready_guard(h.cfg, h.kmeta)
+    g.series = {"KXNFLPASSTDSPROT", "KXNFLPASSTDS"}  # clean on the records, but not one bet when the player sits out
+    assert g(replace(PAIR, kalshi="KXNFLPASSTDSPROT-26NOV01BALBUF-BALLJACKSON8-1"), 0.5) == "Kalshi protected prop"
+    h.kmeta["KXNFLPASSTDS-26NOV01BALBUF-BALLJACKSON8-1"] = h.kmeta["K-1"]
+    assert g(replace(PAIR, kalshi="KXNFLPASSTDS-26NOV01BALBUF-BALLJACKSON8-1"), 0.5) is None
     h.kmeta["K-1"] = KMeta("active", time.time() + DAY / 2, 0.07, shard=3)  # a baseball market, say
     g = ready_guard(h.cfg, h.kmeta)
     assert g(PAIR, 0.5) == "no cash on Kalshi shard 3"

@@ -493,11 +493,20 @@ labels and rules, and asks three questions in one call:
   college and NFL "+X" spread markets say YES is the underdog covering in the title
   but the favourite winning by more than X in the rules.
 
-A pair is approved only if Jev picks the side the matcher proposed (P ≥ 0.6), the
+A pair is approved only if Jev picks the side the matcher proposed (P ≥ 0.55), the
 scope matches and the rules agree. It is rejected if Jev is confident neither side is
 the same bet. Anything else (Jev unsure) is rejected too: a pair is only watched when
 Jev is sure of it. Jev's reason is kept in the `jev_reviews` table. The questions and
 thresholds live together at the top of `jev.py`.
+
+Kalshi's protected player props (rules saying "designated as protected") are rejected
+without asking Jev: Kalshi pays the pre-kickoff fair price when the player sits out
+part of the game, where Polymarket settles on the actual statistics.
+
+Pairs Jev already decided are asked again whenever the request changes, i.e. a new
+`jev_model` or a venue rewording a market, as long as both markets are listed. An
+approval Jev no longer gives is taken out of `pairs.csv`, and a rejection it now
+approves is added.
 
 Validation (jev-1.13.0): on ~140 hand-labelled pairs it approved all 76 equivalent ones
 and none of the 43 wrong games, flipped sides or different competitions. One subtle
@@ -507,9 +516,15 @@ all 50 approvals were correct. Its mistakes lean safe: a few valid pairs get rej
 (unsure counts as a rejection). Because the scanner never trades, a wrong approval shows up as a
 suspicious opportunity, not a loss. Still, read both rulebooks before trading on one.
 
-Cost is ~900 input tokens per pair at $0.042 per million: about $0.20 for a first
-pass over ~5,000 suggestions (~10 minutes at the default 8 requests/s). After that
-only new pairs, or pairs whose text changed, are sent.
+Re-tuned for jev-1.14.0 on 931 settled pairs: 750 that paid out as one bet, 21 whose
+settlements conflicted, 40 protected props and 90 made-up pairs of different matches
+on the same day. It approves 741 of the 750 (as many as jev-1.13.0), 17 of the 20
+conflicts that aren't protected props (1.13: 19) and none of the made-up pairs. Most
+conflicts it still approves read alike on both venues and settled differently.
+
+Cost is ~1,200 input tokens per pair at $0.042 per million: about $0.40 for a first
+pass over ~8,000 pairs (~30 minutes at the default 8 requests/s). After that only new
+pairs, or pairs whose text changed, are sent.
 
 To turn it on, put your key at the top of `config.toml` (which git ignores) and
 restart. It has to go above any `[[auto_approve]]` table, or TOML reads it as part of
@@ -523,7 +538,7 @@ systemctl --user restart arbscan
 ```
 
 `TYPESAFE_API_KEY` in the environment works too. `jev_model` is pinned to
-`jev-1.13.0` because the thresholds were tuned on it.
+`jev-1.14.0` because the thresholds were tuned on it.
 
 ### Latency
 

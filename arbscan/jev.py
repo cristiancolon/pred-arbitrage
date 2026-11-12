@@ -10,13 +10,27 @@ Code turns the answers into a verdict:
 - unsure: anything else. Treated as a rejection: a pair is only watched when Jev is
   sure it is the same bet. Jev's reason is kept in jev_reviews.
 
-The questions and thresholds below are the part to review and tune. They were tuned
-against jev-1.13.0 on ~200 hand-labelled pairs (every equivalent pair approved, every
-wrong game, flipped side and different competition kept out), so the model is pinned
-in config: an alias moving to a new version could shift the probabilities.
+Kalshi "protected" player props are rejected without asking: they pay the pre-kickoff
+fair price when the player sits out part of the game, where Polymarket settles on the
+actual statistics (2026-11-01, Lamar Jackson: Kalshi NO paid 13c and 49c, Polymarket 0).
 
-Cost: ~900 input tokens per pair at $0.042 per million, so a full queue of ~5,000
-pairs is about $0.20, and later refreshes only send pairs Jev hasn't seen.
+Pairs Jev already decided are asked again when the request changes (a new model, or a
+venue rewording a market) while their markets are listed: an approval Jev no longer
+gives is unpaired, and a rejection it now approves is paired.
+
+The questions and thresholds below are the part to review and tune. They were first
+tuned against jev-1.13.0 on ~200 hand-labelled pairs, then re-tuned for jev-1.14.0 on
+931 settled pairs (2026-11-12): 750 that paid out as one bet, 21 whose settlements
+conflicted, 40 protected props and 90 made-up pairs of different matches on the same
+day. There 1.14 approves 741 of the 750 (as many as 1.13 did), 17 of the 20 conflicts
+that aren't protected props (1.13: 19; most of the rest read alike on both venues and
+settled differently, which no wording catches) and none of the made-up pairs. Adding
+start times and market types, or asking about rule differences outright, cost 2% and
+40% of the good pairs. The model is pinned in config: an alias moving to a new version
+could shift the probabilities.
+
+Cost: ~1,200 input tokens per pair at $0.042 per million, so a full queue of ~8,000
+pairs is about $0.40, and later refreshes only send pairs whose request changed.
 """
 
 import asyncio
@@ -33,7 +47,7 @@ import httpx
 
 from .config import Config
 from .http import Api, ApiError
-from .pairs import load_pairs
+from .pairs import Pair, load_pairs, remove_pairs
 from .review import decide
 
 log = logging.getLogger(__name__)
@@ -66,10 +80,14 @@ CONTRADICTION = (
 )
 
 # --- Thresholds ----------------------------------------------------------------
-APPROVE_MIN_SIDE = 0.6  # probability of the proposed side (equivalent pairs scored >= 0.67)
-APPROVE_MIN_SCOPE = 0.6  # same-scope probability (equivalent pairs >= 0.7, conference vs national 0.4)
+# jev-1.14.0 on the settled pairs: side >= 0.6 and scope >= 0.6 kept 737 of 750 good pairs
+# and let 16 bad ones through; 0.55/0.5 kept 741 and let 17 through (0.65: 726 and 12).
+APPROVE_MIN_SIDE = 0.55  # probability of the proposed side (darts, wrong opponent: 0.48)
+APPROVE_MIN_SCOPE = 0.5  # same-scope probability (conference vs national 0.4)
 APPROVE_MAX_CONTRADICTION = 0.5  # equivalent pairs <= 0.46, contradictory spreads >= 0.8
 REJECT_MIN_NEITHER = 0.7  # probability that neither side is the same bet
+
+PROTECTED = "designated as protected"  # in the rules of Kalshi's protected player props
 
 _BOILERPLATE = re.compile(
     r"(Kalshi is not affiliated|This market and these products have not been endorsed|Any references to)[^\n]*",
@@ -146,20 +164,49 @@ def judge(answers: dict, relation: str) -> Verdict:
     return v("approve", "Same bet")
 
 
+def protected(k: sqlite3.Row | dict) -> bool:
+    return PROTECTED in (k["rules"] or "").lower()
+
+
+def _protected_verdict() -> Verdict:
+    return Verdict("reject", "Kalshi protected prop: pays a fair price when the player sits out part of the game",
+                   {"yes_side": 0.0, "no_side": 0.0, "neither": 1.0}, 0.0, 0.0)
+
+
+_COLS = ("k.title AS k_title, k.yes_label AS k_yes, k.rules AS k_rules, "
+         "p.title AS p_title, p.yes_label AS p_yes, p.no_label AS p_no, p.rules AS p_rules, "
+         "j.relation AS j_relation, j.input_hash AS j_hash, j.verdict AS j_verdict")
+_JOINS = ("JOIN markets k ON k.venue = 'K' AND k.id = {t}.kalshi "
+          "JOIN markets p ON p.venue = 'P' AND p.id = {t}.pm "
+          "LEFT JOIN jev_reviews j ON j.kalshi = {t}.kalshi AND j.pm = {t}.pm ")
+
+
 def _pending(cfg: Config, db: sqlite3.Connection) -> list[sqlite3.Row]:
     paired = {(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)}
     rows = db.execute(
-        "SELECT c.kalshi, c.pm, c.relation, c.score, "
-        "k.title AS k_title, k.yes_label AS k_yes, k.rules AS k_rules, "
-        "p.title AS p_title, p.yes_label AS p_yes, p.no_label AS p_no, p.rules AS p_rules, "
-        "j.relation AS j_relation, j.input_hash AS j_hash, j.verdict AS j_verdict "
-        "FROM candidates c "
-        "JOIN markets k ON k.venue = 'K' AND k.id = c.kalshi "
-        "JOIN markets p ON p.venue = 'P' AND p.id = c.pm "
+        f"SELECT c.kalshi, c.pm, c.relation, c.score, NULL AS prev, {_COLS} FROM candidates c "
+        + _JOINS.format(t="c") +
         "LEFT JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
-        "LEFT JOIN jev_reviews j ON j.kalshi = c.kalshi AND j.pm = c.pm "
         "WHERE d.kalshi IS NULL ORDER BY c.score DESC").fetchall()
     return [r for r in rows if (r["kalshi"], r["pm"]) not in paired]
+
+
+def _decided(cfg: Config, db: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Pairs Jev decided whose markets are still listed: its approvals in pairs.csv,
+    then its rejections the matcher still suggests. A person's decision, and a recheck
+    that unpaired a pair, stand."""
+    paired = {(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)}
+    approved = db.execute(
+        f"SELECT d.kalshi, d.pm, d.decision AS relation, d.decision AS prev, {_COLS} FROM decisions d "
+        + _JOINS.format(t="d") +
+        "WHERE d.source = 'jev' AND d.decision IN ('same', 'inverse')").fetchall()
+    rejected = db.execute(
+        f"SELECT c.kalshi, c.pm, c.relation, 'reject' AS prev, {_COLS} FROM candidates c "
+        + _JOINS.format(t="c") +
+        "JOIN decisions d ON d.kalshi = c.kalshi AND d.pm = c.pm "
+        "WHERE d.source = 'jev' AND d.decision = 'reject' ORDER BY c.score DESC").fetchall()
+    return [r for r in approved if (r["kalshi"], r["pm"]) in paired] + [
+        r for r in rejected if (r["kalshi"], r["pm"]) not in paired]
 
 
 def _markets(r: sqlite3.Row) -> tuple[dict, dict]:
@@ -174,51 +221,92 @@ def _decide(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, verdict: str, n
     decide(cfg, db, r["kalshi"], r["pm"], decision, source="jev", note=note, commit=False)
 
 
-def _apply(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, h: str, resp: dict, dry_run: bool) -> Verdict:
-    v = judge(resp["answers"], r["relation"])
+def _unpair(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, v: Verdict) -> None:
+    """An approval Jev no longer gives: out of pairs.csv (the scanner drops it on
+    reload), and the decision becomes Jev's rejection with its reason."""
+    remove_pairs(cfg.pairs_path, {Pair(r["kalshi"], r["pm"], r["relation"]).id})
+    db.execute("UPDATE decisions SET decision = 'reject', note = ?, ts = ? WHERE kalshi = ? AND pm = ?",
+               (f"{cfg.jev_model}: {v.reason}", time.time(), r["kalshi"], r["pm"]))
+    db.commit()
+    log.warning("unpaired %s <-> %s (%s): %s", r["kalshi"], r["pm"], r["relation"], v.reason)
+
+
+def _apply(cfg: Config, db: sqlite3.Connection, r: sqlite3.Row, h: str, v: Verdict, model: str | None,
+           tokens: int | None, dry_run: bool) -> str:
+    """Record Jev's verdict and act on it. Returns what changed: 'approve', 'reject' or
+    'unsure' for a new pair, 'unpaired' or 'paired' when an earlier decision flips, and
+    'kept' when it stands."""
+    approve = v.verdict == "approve"
+    prev = r["prev"]
+    if prev is None:
+        outcome = v.verdict
+    elif prev in ("same", "inverse"):
+        outcome = "kept" if approve else "unpaired"
+    else:
+        outcome = "paired" if approve else "kept"
     if dry_run:
-        return v
+        return outcome
     db.execute(
         "INSERT OR REPLACE INTO jev_reviews (kalshi, pm, relation, input_hash, model, verdict, reason, answers, "
         "tokens, ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (r["kalshi"], r["pm"], r["relation"], h, resp.get("model"), v.verdict, v.reason, json.dumps(v.answers()),
-         (resp.get("usage") or {}).get("input_tokens"), time.time()))
-    p_side = v.side["yes_side" if r["relation"] == "same" else "no_side"]
-    _decide(cfg, db, r, v.verdict, note=f"jev:{p_side:.2f}")
-    return v
+        (r["kalshi"], r["pm"], r["relation"], h, model, v.verdict, v.reason, json.dumps(v.answers()), tokens,
+         time.time()))
+    if outcome == "unpaired":
+        _unpair(cfg, db, r, v)
+    elif outcome != "kept":
+        p_side = v.side["yes_side" if r["relation"] == "same" else "no_side"]
+        _decide(cfg, db, r, v.verdict, note=f"jev:{p_side:.2f}")
+    return outcome
 
 
 async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, dry_run: bool = False,
                  api: Api | None = None, only: set[tuple[str, str]] | None = None) -> dict:
-    """Send every undecided candidate Jev hasn't already read (or whose text changed);
-    with ``only``, just those (kalshi, pm) pairs. A candidate Jev already read, and
-    whose text hasn't changed, gets its stored verdict without another call."""
+    """Send every undecided candidate Jev hasn't already read (or whose text changed),
+    then every pair it decided before whose request has changed since (see the module
+    docstring); with ``only``, just those (kalshi, pm) pairs. A candidate Jev already
+    read, and whose text hasn't changed, gets its stored verdict without another call.
+    Kalshi protected props are rejected without a call."""
     key = api_key(cfg)
     if not key and api is None:
         raise SystemExit("no Jev API key: set jev_api_key in config.toml or TYPESAFE_API_KEY")
     todo, known = [], []
-    for r in _pending(cfg, db):
-        if only is not None and (r["kalshi"], r["pm"]) not in only:
-            continue
-        k, p = _markets(r)
-        body = request_body(k, p, cfg.jev_model)
-        h = input_hash(body)
-        if r["j_hash"] == h and r["j_relation"] == r["relation"]:
-            known.append(r)  # already read this exact pair
-        else:
-            todo.append((r, body, h))
-    todo = todo[: limit if limit is not None else cfg.jev_max_per_run]
-    stats = {"sent": 0, "approve": 0, "reject": 0, "unsure": 0, "failed": 0, "tokens": 0, "known": 0}
+    for decided, rows in ((False, _pending(cfg, db)), (True, _decided(cfg, db))):
+        for r in rows:
+            if only is not None and (r["kalshi"], r["pm"]) not in only:
+                continue
+            k, p = _markets(r)
+            body = request_body(k, p, cfg.jev_model)
+            h = input_hash(body)
+            if r["j_hash"] == h and r["j_relation"] == r["relation"]:
+                if not decided:
+                    known.append(r)  # already read this exact pair
+            else:
+                todo.append((r, body, h))
+    stats = {"sent": 0, "approve": 0, "reject": 0, "unsure": 0, "failed": 0, "tokens": 0, "known": 0,
+             "protected": 0, "unpaired": 0, "paired": 0, "kept": 0}
     if known and not dry_run:
         for r in known:
             _decide(cfg, db, r, r["j_verdict"])
         db.commit()
         stats["known"] = len(known)
         log.info("applied Jev's earlier verdicts to %d candidates (unsure counts as a rejection)", len(known))
+    asks = []
+    for item in todo:
+        r, _, h = item
+        if protected({"rules": r["k_rules"]}):
+            stats[_apply(cfg, db, r, h, _protected_verdict(), None, 0, dry_run)] += 1
+            stats["protected"] += 1
+        else:
+            asks.append(item)
+    db.commit()
+    if stats["protected"]:
+        log.info("rejected %d Kalshi protected props without asking Jev", stats["protected"])
+    todo = asks[: limit if limit is not None else cfg.jev_max_per_run]
     if not todo:
         log.info("nothing new for Jev to review")
         return stats
-    log.info("Jev (%s) reviewing %d candidates%s", cfg.jev_model, len(todo), " (dry run)" if dry_run else "")
+    log.info("Jev (%s) reviewing %d candidates, %d of them decided before%s", cfg.jev_model, len(todo),
+             sum(r["prev"] is not None for r, _, _ in todo), " (dry run)" if dry_run else "")
 
     client = None
     if api is None:
@@ -243,22 +331,25 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
                     log.warning("%s | %s: %s", r["kalshi"], r["pm"], e)
                     stats["failed"] += 1
                 return
+        tokens = (resp.get("usage") or {}).get("input_tokens")
         try:
-            v = _apply(cfg, db, r, h, resp, dry_run)
+            v = judge(resp["answers"], r["relation"])
         except (KeyError, TypeError) as e:  # an answer missing from the response
             log.warning("%s | %s: unexpected response (%r)", r["kalshi"], r["pm"], e)
             stats["failed"] += 1
             return
+        outcome = _apply(cfg, db, r, h, v, resp.get("model"), tokens, dry_run)
         stats["sent"] += 1
-        stats[v.verdict] += 1
-        stats["tokens"] += (resp.get("usage") or {}).get("input_tokens") or 0
+        stats[outcome] += 1
+        stats["tokens"] += tokens or 0
         if dry_run:
-            log.info("%-7s %s | %s (%s): %s", v.verdict, r["kalshi"], r["pm"], r["relation"], v.reason)
+            log.info("%-8s %s | %s (%s): %s", outcome, r["kalshi"], r["pm"], r["relation"], v.reason)
         if stats["sent"] % 50 == 0:
             db.commit()  # progress shows up on the dashboard as it goes
         if stats["sent"] % 250 == 0:
-            log.info("%d/%d reviewed: %d approved, %d rejected, %d rejected as unsure", stats["sent"], len(todo),
-                     stats["approve"], stats["reject"], stats["unsure"])
+            log.info("%d/%d reviewed: %d approved, %d rejected, %d rejected as unsure; of those decided before, "
+                     "%d unpaired, %d paired, %d kept", stats["sent"], len(todo), stats["approve"], stats["reject"],
+                     stats["unsure"], stats["unpaired"], stats["paired"], stats["kept"])
 
     try:
         await asyncio.gather(*(one(item) for item in todo))
@@ -268,8 +359,10 @@ async def review(cfg: Config, db: sqlite3.Connection, limit: int | None = None, 
             await client.aclose()
     if fatal:
         raise SystemExit(fatal[0])
-    log.info("Jev reviewed %d in %.0fs: %d approved, %d rejected, %d rejected as unsure%s; %d tokens (~$%.3f)",
+    log.info("Jev reviewed %d in %.0fs: %d approved, %d rejected, %d rejected as unsure; of those decided before, "
+             "%d unpaired, %d paired, %d kept%s; %d tokens (~$%.3f)",
              stats["sent"], time.monotonic() - t0, stats["approve"], stats["reject"], stats["unsure"],
+             stats["unpaired"], stats["paired"], stats["kept"],
              f", {stats['failed']} failed" if stats["failed"] else "", stats["tokens"],
              stats["tokens"] * PRICE_PER_TOKEN)
     return stats

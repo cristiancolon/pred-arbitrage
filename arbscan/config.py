@@ -180,7 +180,7 @@ class Config:
     # set here or in the TYPESAFE_API_KEY environment variable. The model is pinned
     # because jev.py's thresholds were tuned against it.
     jev_api_key: str = ""
-    jev_model: str = "jev-1.13.0"
+    jev_model: str = "jev-1.14.0"
     jev_rps: float = 8.0
     jev_max_per_run: int = 10000
 

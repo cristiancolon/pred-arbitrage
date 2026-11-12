@@ -1,5 +1,6 @@
 import asyncio
 import time
+from dataclasses import replace
 
 import pytest
 from starlette.testclient import TestClient
@@ -144,3 +145,67 @@ def test_pipeline_counts(env):
     client = TestClient(create_app(svc))
     assert client.get("/api/state").json()["features"] == {"jev": True}
     assert client.get("/api/candidates").status_code == 404  # no review page any more
+
+
+def test_protected_props_are_rejected_without_asking(env):
+    cfg, db = env
+    db.execute(ROW_SQL, _market("K", "K-4", "Jackson 1+ TDs (Protected)", "Jackson: 1+", "Jackson: 1+"))
+    db.execute("UPDATE markets SET rules = 'If Jackson records 1+ TDs, Yes.\nThis Contract is designated as "
+               "protected. If the player plays only the first half...' WHERE id = 'K-4'")
+    db.execute(ROW_SQL, _market("P", "p-4", "same", "Yes", "No"))
+    db.execute("INSERT INTO candidates VALUES ('K-4', 'p-4', 0.9, 'same', 1, ?)", (NOW,))
+    db.commit()
+    api = FakeApi()
+    stats = asyncio.run(jev.review(cfg, db, api=api))
+    assert (stats["protected"], stats["sent"], api.calls) == (1, 3, 3)  # the other three were asked
+    assert db.execute("SELECT decision FROM decisions WHERE kalshi = 'K-4'").fetchone()[0] == "reject"
+    assert "protected" in db.execute("SELECT reason FROM jev_reviews WHERE kalshi = 'K-4'").fetchone()[0]
+    assert ("K-4", "p-4") not in {(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)}
+    assert asyncio.run(jev.review(cfg, db, api=api))["protected"] == 0  # remembered, not re-judged
+
+
+class ChangedMind(FakeApi):
+    """A newer model: unsure about the pair it approved, sure about one it rejected."""
+
+    async def post(self, path, body):
+        self.calls += 1
+        title = body["state"]["polymarket_market"]["title"]
+        a = {"same": answers(yes=0.5, neither=0.48), "diff": answers()}.get(title, answers(yes=0.5, neither=0.48))
+        return {"model": body["model"], "answers": a, "usage": {"input_tokens": 900}}
+
+
+def test_a_new_model_rejudges_earlier_decisions(env):
+    cfg, db = env
+    asyncio.run(jev.review(replace(cfg, jev_model="jev-1.13.0"), db, api=FakeApi()))  # K-1 paired, K-2, K-3 not
+    db.execute(ROW_SQL, _market("K", "K-5", "H wins", "H", "H"))
+    db.execute(ROW_SQL, _market("P", "p-5", "diff", "H", "I"))
+    db.execute("INSERT INTO candidates VALUES ('K-5', 'p-5', 0.8, 'same', 1, ?)", (NOW,))
+    db.execute("INSERT INTO decisions (kalshi, pm, decision, ts, source) VALUES ('K-5', 'p-5', 'reject', ?, "
+               "'human')", (NOW,))  # a person's decision stands
+    db.commit()
+
+    newer = replace(cfg, jev_model="jev-1.14.0")
+    api = ChangedMind()
+    stats = asyncio.run(jev.review(newer, db, api=api))
+    assert (stats["unpaired"], stats["paired"], stats["kept"], api.calls) == (1, 1, 1, 3)
+    assert [(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)] == [("K-2", "p-2")]
+    rows = {r["kalshi"]: (r["decision"], r["source"], r["note"]) for r in db.execute("SELECT * FROM decisions")}
+    assert rows["K-1"] == ("reject", "jev", "jev-1.14.0: Not confident these are the same bet")
+    assert rows["K-2"][:2] == ("same", "jev") and rows["K-3"][:2] == ("reject", "jev")
+    assert rows["K-5"][:2] == ("reject", "human")
+    assert db.execute("SELECT model FROM jev_reviews WHERE kalshi = 'K-3'").fetchone()[0] == "jev-1.14.0"
+
+    # Asked once per change: nothing to send until the model or a market's text changes again.
+    assert asyncio.run(jev.review(newer, db, api=api))["sent"] == 0 and api.calls == 3
+    db.execute("UPDATE markets SET rules = 'reworded' WHERE id = 'p-2'")
+    db.commit()
+    assert asyncio.run(jev.review(newer, db, api=api))["kept"] == 1 and api.calls == 4
+
+
+def test_dry_run_rejudges_nothing(env):
+    cfg, db = env
+    asyncio.run(jev.review(replace(cfg, jev_model="jev-1.13.0"), db, api=FakeApi()))
+    stats = asyncio.run(jev.review(replace(cfg, jev_model="jev-1.14.0"), db, dry_run=True, api=ChangedMind()))
+    assert (stats["unpaired"], stats["paired"]) == (1, 1)
+    assert [(p.kalshi, p.pm) for p in load_pairs(cfg.pairs_path)] == [("K-1", "p-1")]
+    assert db.execute("SELECT DISTINCT model FROM jev_reviews").fetchall()[0][0] == "jev-1.13.0"

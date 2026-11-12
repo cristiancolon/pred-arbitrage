@@ -26,6 +26,7 @@ sends them. The latter two need both venues' API keys.
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -164,6 +165,23 @@ class LiveScanner(Scanner):
         if stale_p:
             self.pm_meta_ts = time.monotonic()
         self._retire_finished()
+
+    def _seed_finished(self) -> None:
+        """Pairs the settlement records already show a venue settled are finished from the
+        start. Without this every pair in pairs.csv is subscribed and looked up again at
+        each start: with 73,000 of them (2026-11-11) Kalshi dropped the feed every 20 s
+        and throttled the lookups, and nothing was priced for six minutes."""
+        try:
+            over = {(r[0], r[1]) for r in self.db.execute(
+                "SELECT venue, id FROM results WHERE (venue = 'K' AND status IN ('finalized', 'settled')) "
+                "OR (venue = 'P' AND status = 'MARKET_STATUS_RESOLVED')")}
+        except sqlite3.Error as e:
+            log.warning("reading the settled markets failed: %s", e)
+            return
+        done = [p for p in self.pairs.pairs if ("K", p.kalshi) in over or ("P", p.pm) in over]
+        self.finished.update(p.id for p in done)
+        if done:
+            log.info("%d pairs already settled by the records; not subscribing to them", len(done))
 
     def _retire_finished(self) -> None:
         ts = time.time()
@@ -378,6 +396,7 @@ class LiveScanner(Scanner):
     async def run_forever(self, stop: asyncio.Event) -> None:
         log.info("streaming scanner started")
         self.pairs.refresh()
+        self._seed_finished()
         self._reindex()
         tasks = [asyncio.create_task(self.kfeed.run(stop)), asyncio.create_task(self.pfeed.run(stop))]
         if self.traders:

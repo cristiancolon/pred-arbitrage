@@ -220,6 +220,23 @@ def _pm(sc, bids, offers, state="MARKET_STATE_OPEN"):
     sc._on_pm("p-1")
 
 
+def test_pairs_the_records_show_settled_are_finished_from_the_start(tmp_path):
+    # 2026-11-11: 73,000 pairs, nearly all long settled, were subscribed and looked up again
+    # at a restart; Kalshi dropped the feed and nothing was priced for six minutes.
+    sc, db = _live(tmp_path)
+    for k, pm in (("K-2", "p-2"), ("K-3", "p-3"), ("K-4", "p-4")):
+        append_pair(sc.cfg.pairs_path, k, pm, "same")
+    db.execute("INSERT INTO results (venue, id, status, checked_ts) VALUES ('K', 'K-2', 'finalized', 0), "
+               "('P', 'p-3', 'MARKET_STATUS_RESOLVED', 0), ('K', 'K-4', 'active', 0), ('P', 'p-4', 'MARKET_STATUS_OPEN', 0)")
+    db.commit()
+    sc.pairs.refresh()
+    sc._seed_finished()
+    sc._reindex()
+    assert sc.finished == {"K-2|p-2", "K-3|p-3"}
+    assert set(sc.by_ticker) == {"K-1", "K-4"} and set(sc.by_slug) == {"p-1", "p-4"}
+    asyncio.run(sc.http.aclose()) if getattr(sc, "http", None) else None
+
+
 def test_live_scanner_prices_on_every_update(tmp_path):
     sc, db = _live(tmp_path)
     kb = sc.kfeed.books.setdefault("K-1", KalshiBook())

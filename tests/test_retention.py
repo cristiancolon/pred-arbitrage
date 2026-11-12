@@ -156,6 +156,39 @@ def test_writer_is_never_blocked_for_long(tmp_path, monkeypatch):
     assert not errors and max(waits) < 1.0
 
 
+def test_batches_stay_large_while_another_writer_holds_the_lock_most_of_the_time(tmp_path, monkeypatch):
+    """The scanner's writer holds the write lock most of every second. Waiting for it
+    isn't the batch being slow: on 2026-11-11 batches had shrunk to 100 rows with long
+    rests, deleting 15 rows a second while 150 were recorded."""
+    monkeypatch.setattr(retention, "MIN_REST_S", 0.005)
+    monkeypatch.setattr(retention, "REST", 4.0)
+    path, db = _db(tmp_path, days=30, per_hour=200)  # 144k quotes
+    db.close()
+    done = threading.Event()
+
+    def writer():
+        w = sqlite3.connect(path, timeout=30, isolation_level=None)
+        while not done.is_set():
+            w.execute("BEGIN IMMEDIATE")
+            w.execute("INSERT INTO quotes (ts, pair) VALUES (?, 'K|P')", (NOW,))
+            time.sleep(0.15)
+            w.execute("COMMIT")
+            time.sleep(0.02)
+        w.close()
+
+    t = threading.Thread(target=writer)
+    t.start()
+    p = sqlite3.connect(path, timeout=30)
+    t0 = time.monotonic()
+    try:
+        res = retention.prune(p, keep_days=1, max_gb=0, now=NOW)
+    finally:
+        done.set()
+        t.join()
+    assert res["deleted"]["quotes"] == 29 * 24 * 200
+    assert time.monotonic() - t0 < 30  # at 50 rows a batch it took minutes
+
+
 def test_pruner_thread_runs_and_leaves_nothing_behind(tmp_path, monkeypatch):
     path, db = _db(tmp_path, days=10)
     db.close()

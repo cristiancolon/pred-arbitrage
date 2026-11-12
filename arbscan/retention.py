@@ -78,6 +78,11 @@ def delete_before(db: sqlite3.Connection, table: str, end: int, halt: threading.
         first = _first(db, table)
         if first is None or first[0] >= end:
             break
+        # Take the write lock first, so the wait for it isn't counted as the batch's own
+        # time: the scanner's writer holds it most of every second, and with that wait
+        # counted every batch looked slow, shrank to 100 rows and rested for seconds
+        # (2026-11-11: 15 rows/s deleted against 150 rows/s recorded).
+        db.execute("BEGIN IMMEDIATE")
         t0 = time.monotonic()
         n += db.execute(f"DELETE FROM {table} WHERE rowid >= ? AND rowid < ?",
                         (first[0], min(end, first[0] + size))).rowcount

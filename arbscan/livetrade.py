@@ -115,7 +115,7 @@ from zoneinfo import ZoneInfo
 
 from . import confirm, moves
 from .catalog import kalshi_start_ts
-from .dryrun import ATTEST_MARGIN_S, SERIES_SQL, Guard, clean_series
+from .dryrun import ATTEST_MARGIN_S, Guard, read_series
 from .fees import order_fee, per_contract
 from .http import make_client
 from .orders import EPS, KalshiTrading, Order, PMTrading, Result, paused, record, status_of
@@ -477,8 +477,7 @@ class LiveGuard(Guard):
         counted as they happen."""
         db = open_db(db_path)
         try:
-            self.series = clean_series(db.execute(SERIES_SQL).fetchall(), self.cfg.live_series_min_settled,
-                                       self.cfg.live_series_max_void)
+            self.series, self.ambiguous = read_series(db, self.cfg)
             self.starts = dict(db.execute(
                 "SELECT id, start_ts FROM markets WHERE venue = 'P' AND start_ts IS NOT NULL").fetchall())
         finally:

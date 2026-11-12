@@ -167,7 +167,7 @@ def test_polymarket_previews_the_buys_and_the_verdict_is_kept(tmp_path):
 def test_the_records_come_from_settled_pairs_and_todays_trades(tmp_path):
     h = DryHarness(tmp_path)
     db = h.db
-    for i in range(25):  # 25 settled NFL pairs, all one bet
+    for i in range(60):  # 60 settled NFL pairs, all one bet
         db.execute("INSERT INTO decisions VALUES (?, ?, 'same', 0, 'jev', NULL)", (f"KXNFLREC-X{i}", f"p{i}"))
         db.execute("INSERT INTO results (venue, id, yes_value, checked_ts, first_final_ts) VALUES ('K', ?, 1, 0, 0)",
                    (f"KXNFLREC-X{i}",))
@@ -178,7 +178,24 @@ def test_the_records_come_from_settled_pairs_and_todays_trades(tmp_path):
     db.commit()
     g = Guard(h.cfg, h.kmeta)
     g.read_records(h.cfg.db_path, "dry_trades")
-    assert g.series == {"KXNFLREC"} and g.lost_today == pytest.approx(1.25)
+    assert g.series == {"KXNFLREC"} and g.lost_today == pytest.approx(1.25) and not g.ambiguous
+    # One of its markets approved against a second Polymarket market, which settled the other
+    # way (2026-10-23: a darts player's two matches the same evening). Neither pairing is
+    # traded again, and the series keeps its record: the conflict counts as one void in 61.
+    db.execute("INSERT INTO decisions VALUES ('KXNFLREC-X0', 'p-other', 'same', 0, 'jev', NULL)")
+    db.execute("INSERT INTO results (venue, id, yes_value, checked_ts, first_final_ts) VALUES ('P', 'p-other', 0, 0, 0)")
+    db.commit()
+    g.read_records(h.cfg.db_path, "dry_trades")
+    assert g.series == {"KXNFLREC"} and g.ambiguous == {"KXNFLREC-X0"}
+    h.kmeta["KXNFLREC-X0"] = h.kmeta["KXNFLREC-X1"] = h.kmeta["K-1"]
+    g.shard_cash, g.attested_until = {0: 150.0}, time.time() + 4 * DAY
+    assert g(replace(PAIR, kalshi="KXNFLREC-X0"), 0.5) == "paired with two markets"
+    assert g(replace(PAIR, kalshi="KXNFLREC-X1"), 0.5) is None
+    # A conflict on a market paired once still rules its series out.
+    db.execute("UPDATE results SET yes_value = 0 WHERE venue = 'P' AND id = 'p1'")
+    db.commit()
+    g.read_records(h.cfg.db_path, "dry_trades")
+    assert g.series == set()
 
 
 def test_the_dry_run_starts_with_the_scanner_when_both_keys_are_set(tmp_path):

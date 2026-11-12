@@ -208,6 +208,8 @@ held to the limits a first, capped live run would have:
   today's gains, across both venues together (`live_daily_loss_usd`).
 - No Kalshi "protected" player prop (a series ending `PROT`): when the player doesn't get
   to play, Kalshi pays a pre-kickoff fair price and Polymarket US resolves plain No.
+- No Kalshi market approved against two or more Polymarket US markets: at most one of
+  those pairings is right. A conflict on such a pair counts against its series as a void.
 - No market the account already holds a position in (it may be one taken by hand).
 - No Kalshi market on an exchange shard without cash: Kalshi fills an order only from
   the cash on its market's shard, and new baseball, tennis and basketball events live

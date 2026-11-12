@@ -11,6 +11,8 @@ limits a first live run would have:
   gets picked far more often than it occurs; this keeps to pairings that have
   already settled as one bet many times. Kalshi's protected player props (series
   ending ``PROT``) never pass: they pay out differently when the player sits out.
+  Nor does a Kalshi market approved against two Polymarket US markets: one of the two
+  pairings is wrong, and such a pair's conflict counts against its series as a void.
 - **Stakes.** At most ``live_max_stake_frac`` of the account's money a trade (cash
   plus open trades, both venues together), both legs together, and only picks
   expected to make ``live_min_profit_usd``.
@@ -53,9 +55,22 @@ ACCOUNT_EVERY_S = 3600.0  # re-read positions, shard cash and the location check
 RECORD_EVERY_S = 600.0  # re-read the series' settlement records and today's losses
 PREVIEW_QUEUE = 50  # previews waiting at most; any more are counted as dropped
 
-SERIES_SQL = """SELECT CASE WHEN instr(kalshi, '-') > 0 THEN substr(kalshi, 1, instr(kalshi, '-') - 1) ELSE kalshi END,
-       COUNT(*), SUM(outcome = 'conflict'), SUM(outcome = 'void')
+# Kalshi markets approved against two or more Polymarket US markets: at most one of those
+# pairings can be right (a darts player's two matches the same evening, 2026-10-23), so
+# none of them is traded, and a conflict among them counts against its series only as a
+# void does (a series where that keeps happening still drops out).
+AMBIGUOUS_SQL = """SELECT kalshi FROM decisions WHERE decision IN ('same', 'inverse')
+GROUP BY kalshi HAVING COUNT(*) > 1"""
+SERIES_SQL = f"""SELECT CASE WHEN instr(kalshi, '-') > 0 THEN substr(kalshi, 1, instr(kalshi, '-') - 1) ELSE kalshi END,
+       COUNT(*), SUM(outcome = 'conflict' AND kalshi NOT IN ({AMBIGUOUS_SQL})),
+       SUM(outcome = 'void' OR (outcome = 'conflict' AND kalshi IN ({AMBIGUOUS_SQL})))
 FROM pair_outcomes GROUP BY 1"""
+
+
+def read_series(db, cfg) -> tuple[set[str], set[str]]:
+    """The series with a clean record, and the Kalshi markets paired more than once."""
+    series = clean_series(db.execute(SERIES_SQL).fetchall(), cfg.live_series_min_settled, cfg.live_series_max_void)
+    return series, {r[0] for r in db.execute(AMBIGUOUS_SQL)}
 
 
 def clean_series(rows, min_settled: int, max_void: float) -> set[str]:
@@ -72,6 +87,7 @@ class Guard:
     def __init__(self, cfg, kmeta: dict):
         self.cfg, self.kmeta = cfg, kmeta
         self.series: set[str] | None = None
+        self.ambiguous: set[str] = set()  # Kalshi markets paired with two or more Polymarket US markets
         self.held: set[str] = set()  # markets the account holds a position in, on either venue
         self.positions: dict[str, float] = {}  # those positions: + YES, - NO contracts
         self.shard_cash: dict[int, float] | None = None
@@ -84,6 +100,8 @@ class Guard:
         series = pair.kalshi.split("-")[0]
         if series.endswith(PROTECTED_SUFFIX):
             return "Kalshi protected prop"
+        if pair.kalshi in self.ambiguous:
+            return "paired with two markets"
         if self.series is None or series not in self.series:
             return "series without a clean record"
         if pair.kalshi in self.held or pair.pm in self.held:
@@ -105,8 +123,7 @@ class Guard:
         """Settlement records per series, and what today's settled trades lost (runs in a thread)."""
         db = open_db(db_path)
         try:
-            self.series = clean_series(db.execute(SERIES_SQL).fetchall(), self.cfg.live_series_min_settled,
-                                       self.cfg.live_series_max_void)
+            self.series, self.ambiguous = read_series(db, self.cfg)
             midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
             pnl = db.execute(f"SELECT COALESCE(SUM(pnl), 0) FROM {table} WHERE settled_ts >= ?",
                              (midnight,)).fetchone()[0]

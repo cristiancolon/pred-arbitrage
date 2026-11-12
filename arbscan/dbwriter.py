@@ -17,6 +17,12 @@ log = logging.getLogger(__name__)
 _COMMIT = object()
 _STOP = object()
 TRUNCATE_EVERY_S = 600  # shrink the WAL file back down now and then (off the event loop)
+WAIT_S = 120.0  # how long a write waits for another writer
+# ... but shrinking the WAL waits for every read under way with the write lock held, so it
+# gives up after this long and tries again at the next commit instead: the other writers
+# (the hourly catalog, the pruner, the settlement recorder) only wait 30 s for the lock.
+CHECKPOINT_WAIT_S = 1.0
+RETRY_S = 60.0
 
 
 class DbWriter:
@@ -51,7 +57,7 @@ class DbWriter:
         return self.q.qsize()
 
     def _run(self) -> None:
-        db = sqlite3.connect(self.path, timeout=120)
+        db = sqlite3.connect(self.path, timeout=WAIT_S)
         db.execute("PRAGMA synchronous=NORMAL")
         truncated = time.monotonic()
         try:
@@ -62,11 +68,16 @@ class DbWriter:
                 if item is _COMMIT:
                     db.commit()
                     if time.monotonic() - truncated > TRUNCATE_EVERY_S:
-                        truncated = time.monotonic()
                         try:
-                            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                            db.execute(f"PRAGMA busy_timeout={int(CHECKPOINT_WAIT_S * 1000)}")
+                            busy = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
                         except sqlite3.Error as e:
+                            busy = 1
                             log.debug("WAL checkpoint skipped: %s", e)
+                        finally:
+                            db.execute(f"PRAGMA busy_timeout={int(WAIT_S * 1000)}")
+                        # Someone was reading: look again in a minute rather than hold the lock.
+                        truncated = time.monotonic() - (TRUNCATE_EVERY_S - RETRY_S if busy else 0)
                 elif isinstance(item, threading.Event):
                     item.set()
                 else:
